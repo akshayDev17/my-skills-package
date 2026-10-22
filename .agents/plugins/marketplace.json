@@ -1,0 +1,26 @@
+{
+  "name": "akshaydev17-skills",
+  "owner": {
+    "name": "akshayDev17"
+  },
+  "description": "Skill plugins by akshayDev17 — one npm package per skill",
+  "interface": {
+    "displayName": "akshayDev17 skills"
+  },
+  "plugins": [
+    {
+      "name": "coursework-author",
+      "description": "Author a structured, module-based self-study course on any technical topic — syllabus blueprint, one README per module, a fixed module anatomy, and verification gates (memory-less logic review + literature survey).",
+      "source": {
+        "source": "npm",
+        "package": "coursework-author",
+        "version": "^1.0.2"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

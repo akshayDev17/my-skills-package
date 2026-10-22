@@ -63,8 +63,21 @@ jobs:
 
       # The pin that sent the video package's hosts to a six-release-old version.
       # Nothing read these before; now something does.
+      #
+      # The failure is echoed as an annotation as well as to the log: reading a job's
+      # log needs admin rights, annotations do not, so a red run explains itself to
+      # whoever has the repo rather than to whoever has the credentials.
       - name: Marketplace pins track each package
-        run: node scripts/check-marketplace-pins.mjs
+        run: |
+          set -euo pipefail
+          if out=$(node scripts/check-marketplace-pins.mjs 2>&1); then
+            echo "$out"
+            exit 0
+          fi
+          echo "$out"
+          msg=$(printf '%s\n' "$out" | grep '✗' | head -3 | tr '\n' ' ' || true)
+          echo "::error title=marketplace pins stale::${msg:-no detail (see log)}"
+          exit 1
 
       - name: Scripts parse
         run: |

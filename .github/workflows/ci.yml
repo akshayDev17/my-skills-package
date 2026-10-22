@@ -45,13 +45,26 @@ jobs:
           set -euo pipefail
           tmp=$(mktemp -d)
           cp -R packages/coursework-author "$tmp/pkg"
+          mkdir -p "$tmp/.claude-plugin" "$tmp/.agents/plugins"
+          cp .claude-plugin/marketplace.json "$tmp/.claude-plugin/"
+          cp .agents/plugins/marketplace.json "$tmp/.agents/plugins/"
           v=$(node -p "require('./packages/coursework-author/package.json').version")
           node scripts/bump-package.mjs "$tmp/pkg" "$v"
           node scripts/bump-package.mjs "$tmp/pkg" 9.9.9
           for f in package.json plugin.json .claude-plugin/plugin.json; do
             grep -q '"version": "9.9.9"' "$tmp/pkg/$f" || { echo "::error::$f was not bumped"; exit 1; }
           done
+          # The catalogues pin a range, which is what Claude/Codex/Gemini install
+          # from; a bump that skips them is a release those hosts never see.
+          for f in .claude-plugin/marketplace.json .agents/plugins/marketplace.json; do
+            grep -q '"version": "\^9.9.9"' "$f" || { echo "::error::$f pin was not bumped"; exit 1; }
+          done
           echo "bump-package: idempotent at the current version, complete at a new one"
+
+      # The pin that sent the video package's hosts to a six-release-old version.
+      # Nothing read these before; now something does.
+      - name: Marketplace pins track each package
+        run: node scripts/check-marketplace-pins.mjs
 
       - name: Scripts parse
         run: |

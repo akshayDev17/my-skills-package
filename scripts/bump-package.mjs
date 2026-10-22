@@ -14,6 +14,35 @@ if (!existsSync(join(dir, "package.json"))) {
   process.exit(1);
 }
 
+const name = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")).name;
+const MARKETPLACES = [".claude-plugin/marketplace.json", ".agents/plugins/marketplace.json"];
+
+// Validate the catalogues BEFORE writing anything: a release that rewrote three
+// manifests and then died on a missing catalogue entry left a half-bumped tree. Read
+// every input, then write.
+const catalogues = MARKETPLACES.map((file) => {
+  const path = resolve(file);
+  if (!existsSync(path)) {
+    console.error(`bump-package: ${file} is missing — hosts have no catalogue to read`);
+    process.exit(1);
+  }
+  let json;
+  try {
+    json = JSON.parse(readFileSync(path, "utf8"));
+  } catch (err) {
+    console.error(`bump-package: cannot read ${file}: ${err.message}`);
+    process.exit(1);
+  }
+  const entry = (json.plugins ?? []).find((p) => p.source?.package === name);
+  if (!entry) {
+    console.error(
+      `bump-package: ${file} does not list ${name} — add an entry with source npm + package "${name}"`,
+    );
+    process.exit(1);
+  }
+  return { file, path, json, entry, before: readFileSync(path, "utf8") };
+});
+
 const MANIFESTS = ["package.json", "plugin.json", ".claude-plugin/plugin.json"];
 const VERSION = /"version"\s*:\s*"([^"]*)"/;
 let found = 0;
@@ -41,3 +70,16 @@ for (const file of MANIFESTS) {
 }
 if (!found) { console.error("bump-package: found no manifests to bump"); process.exit(1); }
 console.log(`bump-package: ${found} manifest(s), ${touched} changed`);
+
+// Then write the pins. Same contract as the manifests: a no-op says so, it is not an
+// error — a release re-run bumps to the version it is already at.
+for (const { file, path, json, entry } of catalogues) {
+  const want = `^${version}`;
+  if (entry.source.version === want) {
+    console.log(`bump: ${file} already ${want}`);
+    continue;
+  }
+  entry.source.version = want;
+  writeFileSync(path, `${JSON.stringify(json, null, 2)}\n`);
+  console.log(`bump: ${file} -> ${want}`);
+}

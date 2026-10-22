@@ -122,7 +122,9 @@ jobs:
           done
           echo "registry confirms $PKG@$NEXT"
 
-          git add "$DIR"
+          # The marketplace catalogues pin the version a host installs from npm;
+          # bump-package.mjs rewrites them, so they belong in this commit.
+          git add "$DIR" .claude-plugin/marketplace.json .agents/plugins/marketplace.json
           if git diff --cached --quiet; then
             echo "note: manifests already at $NEXT — nothing to commit"
           else

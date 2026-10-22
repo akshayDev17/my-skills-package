@@ -1,6 +1,6 @@
 {
   "name": "coursework-author",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Author a structured, module-based self-study course on any technical topic — syllabus blueprint, one README per module, a fixed module anatomy, and two verification gates (memory-less logic review + literature survey).",
   "type": "module",
   "license": "MIT",

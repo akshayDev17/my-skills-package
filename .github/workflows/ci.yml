@@ -59,7 +59,18 @@ jobs:
           for f in .claude-plugin/marketplace.json .agents/plugins/marketplace.json; do
             grep -q '"version": "\^9.9.9"' "$f" || { echo "::error::$f pin was not bumped"; exit 1; }
           done
+
+          # A check that mutates the checkout poisons every later step, and the damage
+          # looks like a *different* check failing — which is exactly how this step's
+          # 9.9.9 sentinel first surfaced: as a stale pin in the repo, one step later.
+          cd "$GITHUB_WORKSPACE"
+          dirty=$(git status --porcelain)
+          if [ -n "$dirty" ]; then
+            echo "::error title=CI mutated the checkout::$dirty"
+            exit 1
+          fi
           echo "bump-package: idempotent at the current version, complete at a new one"
+          echo "workspace=$GITHUB_WORKSPACE tmp=$tmp (checkout clean)"
 
       # The pin that sent the video package's hosts to a six-release-old version.
       # Nothing read these before; now something does.

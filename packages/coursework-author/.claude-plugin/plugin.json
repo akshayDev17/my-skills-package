@@ -1,6 +1,6 @@
 {
   "name": "coursework-author",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Author a structured, module-based self-study course on any technical topic.",
   "author": { "name": "Akshay Prabhakant" },
   "license": "MIT",

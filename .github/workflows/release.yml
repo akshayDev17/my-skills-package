@@ -1,0 +1,93 @@
+# Release one package from this workspace — a human clicks "Run workflow".
+#
+# Commits to main do nothing. A release is dispatched manually, and does the whole job
+# FOR ONE PACKAGE: pick its version, bump that package's manifests, publish it to npm,
+# and only after a successful publish commit + tag. The tag convention is
+# `<package>@<semver>` (the Changesets convention), so several packages can carry
+# independent versions in one repo and `git describe` stays unambiguous per package.
+#
+# One-time prerequisite (see RELEASING.md): on npmjs.com, a Trusted Publisher for
+# package `coursework-author` pointing at this repo + this workflow file, with
+# "Allow npm publish" checked. Nothing is ever published with a long-lived token.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "Which package to release"
+        required: true
+        type: choice
+        default: "coursework-author"
+        options: ["coursework-author"]
+      bump:
+        description: "Semver increment (ignored if you set an explicit version)"
+        required: true
+        type: choice
+        default: "patch"
+        options: ["patch", "minor", "major"]
+      version:
+        description: "Explicit version, e.g. 1.1.0 (optional — overrides bump)"
+        required: false
+        type: string
+
+permissions:
+  contents: write        # push the release commit + tag
+  id-token: write        # OIDC token npm exchanges for a publish credential
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Set git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # One step, so a single outcome drives the notification and the version is only
+      # consumed by a publish that actually succeeded: publish BEFORE commit+tag.
+      - name: Release
+        id: release
+        env:
+          PKG: ${{ inputs.package }}
+          BUMP: ${{ inputs.bump }}
+          VERSION_OVERRIDE: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          DIR="packages/$PKG"
+          [ -d "$DIR" ] || { echo "no such package: $PKG"; exit 1; }
+
+          CURRENT=$(git describe --tags --abbrev=0 --match "$PKG@*" 2>/dev/null || true)
+          CURRENT=${CURRENT#"$PKG@"}
+          [ -z "$CURRENT" ] && CURRENT=$(node -p "require('./$DIR/package.json').version")
+
+          if [ -n "$VERSION_OVERRIDE" ]; then NEXT="$VERSION_OVERRIDE"
+          else NEXT=$(node scripts/next-version.mjs "$CURRENT" "$BUMP"); fi
+
+          echo "releasing: $PKG $CURRENT -> $NEXT"
+          node scripts/bump-package.mjs "$DIR" "$NEXT"
+
+          {
+            npx --yes npm@11.15.0 publish --workspace "$DIR" --access public --provenance
+            git add "$DIR"
+            git commit -m "chore(release): $PKG@$NEXT"
+            git tag "$PKG@$NEXT"
+            git push origin "$PKG@$NEXT" HEAD:main
+          }
+
+          # The publish is not trusted until the registry confirms it. A silent no-op
+          # here would otherwise consume a version that never shipped.
+          npx --yes npm@11.15.0 view "$PKG@$NEXT" version | grep -q "$NEXT"
+
+          echo "released=true"     >> "$GITHUB_OUTPUT"
+          echo "version=$NEXT"     >> "$GITHUB_OUTPUT"
+          echo "package=$PKG"      >> "$GITHUB_OUTPUT"

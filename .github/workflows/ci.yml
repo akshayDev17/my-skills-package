@@ -1,0 +1,46 @@
+# CI — the checks that cost nothing and catch the things a human cannot see.
+#
+# Both gates here exist because a published package can be *wrong while every test
+# passes*. `coursework-author@1.0.0` shipped without `.claude-plugin/plugin.json`
+# (npm's `files` allowlist drops dotfiles silently, so the Claude host got nothing)
+# and carried a `.claude-plugin/plugin.json` that said 1.1.0 while package.json said
+# 1.0.0. Neither is visible to a test that reads package.json, and neither breaks the
+# install — they only break one of the four hosts. So both are checked mechanically:
+# the tarball must contain everything on disk, and the manifests must agree.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  publishable:
+    name: publishable as-is
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version: "22" }
+
+      # Every host may read anything in the package dir, so everything must ship.
+      - name: Tarball contains every on-disk file
+        run: node scripts/check-package-contents.mjs
+
+      # Names and versions must be identical across package.json, plugin.json and
+      # .claude-plugin/plugin.json; entry points must resolve; each skill's SKILL.md
+      # must declare the name it is mounted under.
+      - name: Host manifests agree
+        run: node scripts/check-manifests.mjs
+
+      - name: Scripts parse
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(scripts/*.mjs)
+          [ ${#files[@]} -gt 0 ] || { echo "no scripts matched — the layout moved"; exit 1; }
+          for f in "${files[@]}"; do node --check "$f"; done
+          echo "parsed ${#files[@]} files"

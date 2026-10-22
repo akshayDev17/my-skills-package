@@ -40,37 +40,42 @@ jobs:
       # reported as "no version field found" (the no-op replace and the missing
       # field were the same branch), which failed the very re-run it existed to
       # make possible — so the recovery path a failed release needs was broken.
-      - name: Bump is idempotent and touches every manifest
+      # A release re-run bumps to the version it is already at. That used to be
+      # reported as "no version field found" (the no-op replace and the missing field
+      # were the same branch), so the recovery path a failed release needs was broken.
+      - name: Bump is idempotent, touching every manifest and both pins
         run: |
           set -euo pipefail
+          v=$(node -p "require('./packages/coursework-author/package.json').version")
           tmp=$(mktemp -d)
           cp -R packages/coursework-author "$tmp/pkg"
           mkdir -p "$tmp/.claude-plugin" "$tmp/.agents/plugins"
           cp .claude-plugin/marketplace.json "$tmp/.claude-plugin/"
           cp .agents/plugins/marketplace.json "$tmp/.agents/plugins/"
-          v=$(node -p "require('./packages/coursework-author/package.json').version")
-          node scripts/bump-package.mjs "$tmp/pkg" "$v"
-          node scripts/bump-package.mjs "$tmp/pkg" 9.9.9
+
+          # Run INSIDE the copy. bump-package.mjs resolves the catalogues relative to
+          # its working directory, so running it from the checkout rewrites the repo's
+          # own pins — which is precisely what happened: the 9.9.9 sentinel below ended
+          # up committed into this workspace and surfaced as a stale pin one step later.
+          cd "$tmp"
+          node "$GITHUB_WORKSPACE/scripts/bump-package.mjs" pkg "$v"
+          node "$GITHUB_WORKSPACE/scripts/bump-package.mjs" pkg 9.9.9
           for f in package.json plugin.json .claude-plugin/plugin.json; do
-            grep -q '"version": "9.9.9"' "$tmp/pkg/$f" || { echo "::error::$f was not bumped"; exit 1; }
+            grep -q '"version": "9.9.9"' "pkg/$f" || { echo "::error::pkg/$f was not bumped"; exit 1; }
           done
-          # The catalogues pin a range, which is what Claude/Codex/Gemini install
-          # from; a bump that skips them is a release those hosts never see.
           for f in .claude-plugin/marketplace.json .agents/plugins/marketplace.json; do
             grep -q '"version": "\^9.9.9"' "$f" || { echo "::error::$f pin was not bumped"; exit 1; }
           done
 
           # A check that mutates the checkout poisons every later step, and the damage
-          # looks like a *different* check failing — which is exactly how this step's
-          # 9.9.9 sentinel first surfaced: as a stale pin in the repo, one step later.
+          # then looks like a different check failing.
           cd "$GITHUB_WORKSPACE"
           dirty=$(git status --porcelain)
           if [ -n "$dirty" ]; then
-            echo "::error title=CI mutated the checkout::$dirty"
+            echo "::error title=CI mutated the checkout::$(printf '%s' "$dirty" | tr '\n' ' ')"
             exit 1
           fi
-          echo "bump-package: idempotent at the current version, complete at a new one"
-          echo "workspace=$GITHUB_WORKSPACE tmp=$tmp (checkout clean)"
+          echo "bump-package: idempotent at the current version, complete at a new one; checkout clean"
 
       # The pin that sent the video package's hosts to a six-release-old version.
       # Nothing read these before; now something does.

@@ -15,18 +15,29 @@ if (!existsSync(join(dir, "package.json"))) {
 }
 
 const MANIFESTS = ["package.json", "plugin.json", ".claude-plugin/plugin.json"];
+const VERSION = /"version"\s*:\s*"([^"]*)"/;
+let found = 0;
 let touched = 0;
 for (const file of MANIFESTS) {
   const path = resolve(join(dir, file));
   if (!existsSync(path)) continue;                    // optional per package
   const before = readFileSync(path, "utf8");
-  const after = before.replace(/"version"\s*:\s*"[^"]*"/, `"version": "${version}"`);
-  if (after === before) {
-    console.error(`bump-package: no "version" field found in ${file}`);
+  // "no version field" and "already that version" were the same branch once, so a
+  // no-op bump reported a missing field and failed the release re-run it existed to
+  // make possible. They are different outcomes, so test for the field itself.
+  if (!VERSION.test(before)) {
+    console.error(`bump-package: no "version" field in ${file}`);
     process.exit(1);
+  }
+  found++;
+  const after = before.replace(VERSION, `"version": "${version}"`);
+  if (after === before) {
+    console.log(`bump: ${dir}/${file} already ${version}`);
+    continue;
   }
   writeFileSync(path, after);
   console.log(`bump: ${dir}/${file} -> ${version}`);
   touched++;
 }
-if (!touched) { console.error("bump-package: touched nothing"); process.exit(1); }
+if (!found) { console.error("bump-package: found no manifests to bump"); process.exit(1); }
+console.log(`bump-package: ${found} manifest(s), ${touched} changed`);

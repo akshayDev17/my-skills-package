@@ -36,6 +36,23 @@ jobs:
       - name: Host manifests agree
         run: node scripts/check-manifests.mjs
 
+      # A release re-run bumps to the version it is already at. That used to be
+      # reported as "no version field found" (the no-op replace and the missing
+      # field were the same branch), which failed the very re-run it existed to
+      # make possible — so the recovery path a failed release needs was broken.
+      - name: Bump is idempotent and touches every manifest
+        run: |
+          set -euo pipefail
+          tmp=$(mktemp -d)
+          cp -R packages/coursework-author "$tmp/pkg"
+          v=$(node -p "require('./packages/coursework-author/package.json').version")
+          node scripts/bump-package.mjs "$tmp/pkg" "$v"
+          node scripts/bump-package.mjs "$tmp/pkg" 9.9.9
+          for f in package.json plugin.json .claude-plugin/plugin.json; do
+            grep -q '"version": "9.9.9"' "$tmp/pkg/$f" || { echo "::error::$f was not bumped"; exit 1; }
+          done
+          echo "bump-package: idempotent at the current version, complete at a new one"
+
       - name: Scripts parse
         run: |
           set -euo pipefail

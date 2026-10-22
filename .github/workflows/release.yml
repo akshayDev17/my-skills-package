@@ -53,8 +53,18 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      # One step, so a single outcome drives the notification and the version is only
-      # consumed by a publish that actually succeeded: publish BEFORE commit+tag.
+      # One step, and the order inside it is the whole design: publish, then WAIT for
+      # the registry to admit the version exists, then commit + tag. Nothing is
+      # recorded in git until the registry confirms, so a publish that consumed a
+      # version without shipping it can never be papered over by a tag.
+      #
+      # "Wait" is not paranoia. On the first run of this workflow the publish
+      # succeeded — provenance signed, tarball uploaded — and the very next read of
+      # the version answered 404, because the registry is eventually consistent and
+      # npm says so out loud ("Your package is being processed and may take a few
+      # minutes to become available"). The step read that 404 as a failed publish,
+      # exited 1, and left a tag claiming a version the registry had not published
+      # yet. Hence: poll the registry, never trust the first answer.
       - name: Release
         id: release
         env:
@@ -76,17 +86,54 @@ jobs:
           echo "releasing: $PKG $CURRENT -> $NEXT"
           node scripts/bump-package.mjs "$DIR" "$NEXT"
 
-          {
-            npx --yes npm@11.15.0 publish --workspace "$DIR" --access public --provenance
-            git add "$DIR"
-            git commit -m "chore(release): $PKG@$NEXT"
-            git tag "$PKG@$NEXT"
-            git push origin "$PKG@$NEXT" HEAD:main
+          # Ask the registry itself, not npm's cache, so a stale packument cannot
+          # answer for the registry. Anonymous reads are enough: these packages are
+          # published with public access by design.
+          registry_has() {
+            curl -fsS -H 'Accept: application/json' \
+              "https://registry.npmjs.org/$1/$2" -o /dev/null
           }
 
-          # The publish is not trusted until the registry confirms it. A silent no-op
-          # here would otherwise consume a version that never shipped.
-          npx --yes npm@11.15.0 view "$PKG@$NEXT" version | grep -q "$NEXT"
+          if registry_has "$PKG" "$NEXT"; then
+            # A previous run may have published this version and died before the
+            # bookkeeping below — which is exactly what happened. Publishing again
+            # would be refused ("cannot publish over the previously published
+            # versions"), so resume: finish the release that the registry already
+            # agreed to, instead of demanding a version bump to recover.
+            echo "note: $PKG@$NEXT is already published — resuming the release"
+          else
+            npx --yes npm@11.15.0 publish --workspace "$DIR" --access public --provenance
+          fi
+
+          ATTEMPTS=48          # 48 x 15s = 12 minutes. Measured, not guessed: the
+                               # 1.0.1 publish landed 7.5 minutes after npm said
+                               # "+ coursework-author@1.0.1", so a 6-minute window
+                               # would still have failed on a correct publish.
+          for attempt in $(seq 1 "$ATTEMPTS"); do
+            registry_has "$PKG" "$NEXT" && break
+            if [ "$attempt" -eq "$ATTEMPTS" ]; then
+              echo "::error::$PKG@$NEXT is still absent from the registry after 12 minutes."
+              echo "Check https://www.npmjs.com/package/$PKG/v/$NEXT before re-dispatching:"
+              echo "if it landed, re-dispatch with version=$NEXT and the publish is skipped."
+              exit 1
+            fi
+            echo "waiting for $PKG@$NEXT (attempt $attempt/$ATTEMPTS)"
+            sleep 15
+          done
+          echo "registry confirms $PKG@$NEXT"
+
+          git add "$DIR"
+          if git diff --cached --quiet; then
+            echo "note: manifests already at $NEXT — nothing to commit"
+          else
+            git commit -m "chore(release): $PKG@$NEXT"
+          fi
+          if git rev-parse -q --verify "refs/tags/$PKG@$NEXT" > /dev/null; then
+            echo "note: tag $PKG@$NEXT already exists"
+          else
+            git tag "$PKG@$NEXT"
+          fi
+          git push origin "$PKG@$NEXT" HEAD:main
 
           echo "released=true"     >> "$GITHUB_OUTPUT"
           echo "version=$NEXT"     >> "$GITHUB_OUTPUT"

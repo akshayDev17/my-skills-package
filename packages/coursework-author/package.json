@@ -1,0 +1,15 @@
+{
+  "name": "coursework-author",
+  "version": "1.0.0",
+  "description": "Author a structured, module-based self-study course on any technical topic — syllabus blueprint, one README per module, a fixed module anatomy, and two verification gates (memory-less logic review + literature survey).",
+  "type": "module",
+  "license": "MIT",
+  "main": "lib/index.js",
+  "exports": { ".": "./lib/index.js", "./package.json": "./package.json" },
+  "files": ["lib", "skills", "plugin.json", "cordis.patch.yml", "README.md"],
+  "engines": { "dsh": ">=0.1.0-rc.6" },
+  "repository": { "type": "git", "url": "git+https://github.com/akshayDev17/my-skills-package.git",
+                  "directory": "packages/coursework-author" },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "keywords": ["coursework", "curriculum", "syllabus", "self-study", "literature-survey"]
+}

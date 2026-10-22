@@ -1,0 +1,10 @@
+{
+  "name": "my-skills-package",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "A shelf of DSH plugins, one package per skill.",
+  "workspaces": ["packages/*"],
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/akshayDev17/my-skills-package.git" }
+}

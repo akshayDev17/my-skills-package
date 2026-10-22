@@ -6,7 +6,7 @@
   "license": "MIT",
   "main": "lib/index.js",
   "exports": { ".": "./lib/index.js", "./package.json": "./package.json" },
-  "files": ["lib", "skills", "plugin.json", "cordis.patch.yml", "README.md"],
+  "files": ["lib", "skills", "plugin.json", ".claude-plugin/plugin.json", "cordis.patch.yml", "README.md"],
   "engines": { "dsh": ">=0.1.0-rc.6" },
   "repository": { "type": "git", "url": "git+https://github.com/akshayDev17/my-skills-package.git",
                   "directory": "packages/coursework-author" },

@@ -19,7 +19,7 @@ Three steps, each one only filling in what is missing:
 1. **Cloudflare Access.** Find or create one reusable *allow* policy named
    `portfolio-app sign-in` that includes the config's `allowedEmails`. Then find or create a self-hosted Access
    app whose destinations are exactly `<domain>/<prefix>` and `<domain>/<prefix>/*`, attached to
-   that policy. With `--apply`, it then waits until the path answers 302 to
+   that policy. With `--apply`, it then waits until the path redirects (3xx) to
    `<team>.cloudflareaccess.com/cdn-cgi/access/login/…`, and stops before touching GitHub if it
    never does.
 2. **D1.** Find the database by name or create it, then write its id into the clone's
@@ -32,7 +32,8 @@ Three steps, each one only filling in what is missing:
    stdin, never in argv.
 
 Without `--apply`, the command prints the plan and changes nothing: planning makes Cloudflare
-`GET`s, `gh` reads, `git remote get-url`, and keychain *existence* checks only. Exit codes: `0`
+`GET`s (with the setup token read from the keychain), `gh` reads, `git remote get-url`, and an
+*existence* check on the deploy-token keychain entry only. Exit codes: `0`
 ok, `1` a step failed, `2` usage error or a conflict in the plan.
 
 **What it refuses or leaves alone.**

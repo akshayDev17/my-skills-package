@@ -25,10 +25,10 @@ One-time machine setup (config file and the two keychain entries) is in the pack
    This reads only. Each line is `✓` exists, `+` will be created, `!` differs but will be left alone, `✗` conflict.
    *Done when the plan is printed and shown to the user verbatim.*
 
-2. **Resolve conflicts (`✗`) by hand.** Exit code 2 means a conflict: an Access app that overlaps the prefix without matching it, a clone of the wrong repo, an ambiguous `wrangler.jsonc`, or a missing keychain entry. The script will not apply while one stands. Report it; do not work around it.
+2. **Resolve conflicts (`✗`) by hand.** Exit code 2 means a conflict: an Access app that overlaps the prefix without matching it, a clone of the wrong repo, an ambiguous `wrangler.jsonc`, or a missing deploy-token keychain entry. The script will not apply while one stands. Report it; do not work around it.
    *Done when a re-plan shows no `✗`.*
 
-3. **Get explicit approval for the exact plan, then apply.** Creating a policy or Access app changes who can reach the site, so `--apply` runs only after the user approves the printed plan in this conversation. Then re-run the same command with `--apply`. It creates the `+` lines in order, waits until the prefix 302s to `<team>.cloudflareaccess.com`, and stops with an error before touching GitHub if it never does.
+3. **Get explicit approval for the exact plan, then apply.** Creating a policy or Access app changes who can reach the site, so `--apply` runs only after the user approves the printed plan in this conversation. Then re-run the same command with `--apply`. It creates the `+` lines in order, waits until the prefix redirects to `<team>.cloudflareaccess.com`, and stops with an error before touching GitHub if it never does.
    *Done when the run ends with `done`.*
 
 4. **Commit the `wrangler.jsonc` change through the repo's normal delivery path.** The script edits the clone and never commits. The diff is one line: the placeholder replaced by the database id.

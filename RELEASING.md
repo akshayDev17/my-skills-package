@@ -58,7 +58,7 @@ publish, and finishes the commit + tag.
 1. `packages/<skill>/` with `package.json`, `plugin.json`, `.claude-plugin/plugin.json`,
    `cordis.patch.yml`, `lib/index.js`, `skills/<skill>/SKILL.md`.
 2. Add a `plugins[]` entry for it in **both** catalogues — `.claude-plugin/marketplace.json` and
-   `.agents/plugins/marketplace.json` — with `source: { source: "npm", package: "<skill>",
+   `.agents/plugins/marketplace.json` — with `source: { source: "npm", package: "<npm name>",
    version: "^<current>" }`. A package that is not listed there cannot be installed on Claude,
    Codex or Antigravity at all, and `scripts/check-marketplace-pins.mjs` fails CI until it is.
 3. Add the package's npm name to the `package` options in `.github/workflows/release.yml`. A

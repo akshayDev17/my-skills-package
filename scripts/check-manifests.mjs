@@ -17,6 +17,7 @@ import { join, resolve } from "node:path";
 const ROOT = resolve(import.meta.dirname, "..");
 
 const readJson = async (path) => JSON.parse(await readFile(path, "utf8"));
+// The npm name may carry a scope; the plugin manifests carry the bare skill name.
 const unscoped = (name) => name?.replace(/^@[^/]+\//, "");
 
 async function packageDirs() {

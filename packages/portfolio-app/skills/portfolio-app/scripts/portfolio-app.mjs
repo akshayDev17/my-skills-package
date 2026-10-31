@@ -82,8 +82,9 @@ async function bootstrapCommand(values, { fetch, run, log }) {
   const opts = { repo: values.repo, prefix, cloneDir: resolve(values.clone ?? "."), d1Flag: values.d1, config };
 
   const actions = await planBootstrap({ cf, run, fetch }, opts);
-  log(formatPlan(actions, { ...opts, apply: values.apply }));
-  if (actions.some((a) => a.state === "conflict")) return 2;
+  const hasConflict = actions.some((a) => a.state === "conflict");
+  log(formatPlan(actions, { ...opts, apply: values.apply && !hasConflict }));
+  if (hasConflict) return 2;
   if (!values.apply) return 0;
 
   log("applying:");

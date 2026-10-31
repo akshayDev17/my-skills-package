@@ -228,6 +228,16 @@ test("cli bootstrap --apply carries the plan out", async () => {
   assert.ok(!r.out.includes(SETUP_TOKEN) && !r.out.includes(DEPLOY_TOKEN));
 });
 
+test("cli bootstrap --apply with a conflict keeps the plan-only header and applies nothing", async () => {
+  const world = freshWorld();
+  world.site.apps.push({ id: "app-x", name: "half", destinations: [{ uri: `${DOMAIN}/graph` }] });
+  const r = await cli(world, ["bootstrap", "--repo", REPO, "--path", PREFIX, "--clone", makeClone(), "--config", writeConfig(), "--apply"]);
+  assert.equal(r.code, 2);
+  assert.match(r.out, /plan only; nothing changes without --apply/);
+  assert.doesNotMatch(r.out, /— applying/);
+  assert.deepEqual(r.http.calls.filter((c) => c.method !== "GET"), []);
+});
+
 test("cli refuses a config file kept inside a git repo", async () => {
   const world = freshWorld();
   world.local.configInRepo = true;

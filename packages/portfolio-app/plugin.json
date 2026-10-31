@@ -1,0 +1,11 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "portfolio-app",
+  "version": "0.1.0",
+  "description": "Bootstrap a sub-app's Cloudflare Access app, D1 database and GitHub production secrets, and check its path is behind Access.",
+  "author": { "name": "Akshay Prabhakant" },
+  "license": "MIT",
+  "homepage": "https://github.com/akshayDev17/my-skills-package",
+  "repository": "https://github.com/akshayDev17/my-skills-package",
+  "keywords": ["cloudflare", "cloudflare-access", "d1", "github-actions"]
+}

@@ -16,6 +16,18 @@ For each package under `packages/`, on npmjs.com ([Trusted Publishing](https://d
 
 No long-lived token exists anywhere; the workflow exchanges a short-lived OIDC token.
 
+### First publish of `@akshaydev17/portfolio-app`
+
+npm lets a Trusted Publisher be registered only for a package that already exists, so this
+package's first version is published by hand, by the repo owner, from a clean checkout:
+
+```sh
+cd packages/portfolio-app && npm publish --access public
+```
+
+Then register its Trusted Publisher (above, package `@akshaydev17/portfolio-app`). Until both
+are done, the release workflow cannot publish it.
+
 ## Releasing a package
 
 1. Actions → **release** → *Run workflow*.
@@ -46,8 +58,10 @@ publish, and finishes the commit + tag.
 1. `packages/<skill>/` with `package.json`, `plugin.json`, `.claude-plugin/plugin.json`,
    `cordis.patch.yml`, `lib/index.js`, `skills/<skill>/SKILL.md`.
 2. Add a `plugins[]` entry for it in **both** catalogues — `.claude-plugin/marketplace.json` and
-   `.agents/plugins/marketplace.json` — with `source: { source: "npm", package: "<skill>",
+   `.agents/plugins/marketplace.json` — with `source: { source: "npm", package: "<npm name>",
    version: "^<current>" }`. A package that is not listed there cannot be installed on Claude,
    Codex or Antigravity at all, and `scripts/check-marketplace-pins.mjs` fails CI until it is.
-3. Add `<skill>` to the `package` options in `.github/workflows/release.yml`.
+3. Add the package's npm name to the `package` options in `.github/workflows/release.yml`. A
+   scoped name (`@scope/<skill>`) still lives in `packages/<skill>/`; its tag is
+   `@scope/<skill>@<semver>`.
 4. Register its trusted publisher (above).

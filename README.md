@@ -7,7 +7,7 @@ Codex, Gemini/Antigravity and DeepSeek Harness. Adding a skill means adding a di
 | package | what it does |
 |---|---|
 | [`coursework-author`](./packages/coursework-author) | Author a structured, module-based self-study course on any topic: syllabus blueprint, one README per module, a fixed module anatomy, then two verification gates (a memory-less logic review and a literature survey). |
-| [`portfolio-app`](./packages/portfolio-app) | Bootstrap a sub-app of the personal site in one command: its Cloudflare Access app for the path, its D1 database id, and its GitHub `production` secrets. Plans by default and applies on `--apply`. Also ships `verify`, a token-free login check that deploy jobs run first. Not yet published to npm. |
+| [`@akshaydev17/portfolio-app`](./packages/portfolio-app) | Bootstrap a sub-app of the personal site in one command: its Cloudflare Access app for the path, its D1 database id, and its GitHub `production` secrets. Plans by default and applies on `--apply`. Also ships `verify`, a token-free login check that deploy jobs run first. Not yet published to npm. |
 
 ## Install
 

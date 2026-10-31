@@ -100,7 +100,7 @@ test("d1Target decides one database per app, and says why when it cannot", () =>
 
 test("parseConfig names every problem at once", () => {
   const good = { domain: "example.com", accountId: "0".repeat(32), team: "t", allowedEmails: ["a@b.c"] };
-  assert.equal(parseConfig(JSON.stringify(good), "c.json").policyName, "portfolio-app sign-in");
+  assert.deepEqual(parseConfig(JSON.stringify(good), "c.json"), good);
   assert.throws(() => parseConfig("{", "c.json"), /not valid JSON/);
   assert.throws(
     () => parseConfig(JSON.stringify({ domain: "https://x", accountId: "nope", allowedEmails: [] }), "c.json"),

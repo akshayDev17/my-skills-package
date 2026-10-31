@@ -11,11 +11,11 @@ import { dirname, join } from "node:path";
 export const KEYCHAIN_SERVICE = "portfolio-app";
 export const SETUP_TOKEN_ACCOUNT = "cloudflare-setup-token";
 export const DEPLOY_TOKEN_ACCOUNT = "cloudflare-deploy-token";
-export const DEFAULT_POLICY_NAME = "portfolio-app sign-in";
+export const POLICY_NAME = "portfolio-app sign-in";
 export const GITHUB_ENVIRONMENT = "production";
 
-export function defaultConfigPath(env = process.env) {
-  return env.PORTFOLIO_APP_CONFIG || join(homedir(), ".config", "portfolio-app", "config.json");
+export function defaultConfigPath() {
+  return join(homedir(), ".config", "portfolio-app", "config.json");
 }
 
 /** Parses and checks the config file's text; returns the fields bootstrap uses. */
@@ -40,16 +40,12 @@ export function parseConfig(text, path) {
       !raw.allowedEmails.every((e) => typeof e === "string" && /^[^@\s]+@[^@\s]+$/.test(e))) {
     problems.push(`"allowedEmails" must be a non-empty list of email addresses`);
   }
-  if (raw.policyName !== undefined && (typeof raw.policyName !== "string" || raw.policyName.trim() === "")) {
-    problems.push(`"policyName", when set, must be a non-empty string`);
-  }
   if (problems.length > 0) throw new Error(`${path}:\n  - ${problems.join("\n  - ")}`);
   return {
     domain: raw.domain,
     accountId: raw.accountId,
     team: raw.team,
     allowedEmails: raw.allowedEmails,
-    policyName: raw.policyName ?? DEFAULT_POLICY_NAME,
   };
 }
 

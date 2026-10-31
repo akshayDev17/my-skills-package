@@ -1,11 +1,11 @@
-# portfolio-app
+# @akshaydev17/portfolio-app
 
 Set up a new sub-app of the personal site in one command, and check from CI that its path is
 behind Cloudflare Access before every deploy.
 
 Ships one skill (`skills/portfolio-app/SKILL.md`) and the script it drives
 (`skills/portfolio-app/scripts/portfolio-app.mjs`), which is also the package's `portfolio-app`
-npm bin, so it runs with or without an agent. Works with Claude Code, Codex, Gemini and DSH; the
+bin, so it runs with or without an agent. Works with Claude Code, Codex, Gemini and DSH; the
 `lib/` + `cordis.patch.yml` pairing is DSH's mounting glue only. Node 20+, no dependencies.
 
 ## `bootstrap`
@@ -16,8 +16,8 @@ portfolio-app bootstrap --repo <owner/name> --path /<prefix> [--d1 <name>] [--cl
 
 Three steps, each one only filling in what is missing:
 
-1. **Cloudflare Access.** Find or create one reusable *allow* policy (`policyName` from the
-   config) that includes the config's `allowedEmails`. Then find or create a self-hosted Access
+1. **Cloudflare Access.** Find or create one reusable *allow* policy named
+   `portfolio-app sign-in` that includes the config's `allowedEmails`. Then find or create a self-hosted Access
    app whose destinations are exactly `<domain>/<prefix>` and `<domain>/<prefix>/*`, attached to
    that policy. With `--apply`, it then waits until the path answers 302 to
    `<team>.cloudflareaccess.com/cdn-cgi/access/login/…`, and stops before touching GitHub if it
@@ -64,7 +64,7 @@ given), so it can be the first step of a GitHub Actions deploy job:
 
 ```yaml
 - name: Refuse to deploy unless the path is behind Cloudflare Access
-  run: npx -y portfolio-app verify --domain akshayprabhakant.com --team shiny-moon-6b37 --path /quiz
+  run: npx -y @akshaydev17/portfolio-app@0.1.0 verify --domain akshayprabhakant.com --team shiny-moon-6b37 --path /quiz
 ```
 
 Until the package is published to npm, run the script from a checkout of this repo instead:
@@ -74,8 +74,7 @@ Until the package is published to npm, run the script from a checkout of this re
 
 ### Config file
 
-`~/.config/portfolio-app/config.json` by default; override with `--config <file>` or
-`PORTFOLIO_APP_CONFIG`. It must live outside any git work tree, and the script refuses one that
+`~/.config/portfolio-app/config.json` by default; override with `--config <file>`. It must live outside any git work tree, and the script refuses one that
 does not. Placeholder values:
 
 ```json
@@ -83,8 +82,7 @@ does not. Placeholder values:
   "domain": "example.com",
   "accountId": "0123456789abcdef0123456789abcdef",
   "team": "your-team",
-  "allowedEmails": ["you@example.com"],
-  "policyName": "portfolio-app sign-in"
+  "allowedEmails": ["you@example.com"]
 }
 ```
 
@@ -94,7 +92,6 @@ does not. Placeholder values:
 | `accountId` | the Cloudflare account id (32 hex characters) |
 | `team` | the Zero Trust team name: the `<team>` in `<team>.cloudflareaccess.com` |
 | `allowedEmails` | who may sign in; becomes the reusable policy's `include` rules |
-| `policyName` | optional; the reusable policy to find or create (default `portfolio-app sign-in`) |
 
 ### Keychain entries
 

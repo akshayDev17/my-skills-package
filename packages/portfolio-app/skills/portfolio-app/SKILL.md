@@ -7,7 +7,7 @@ description: Bootstrap a new sub-app of the personal site (akshayprabhakant.com)
 
 Every sub-app of the site lives under its own path prefix (`/quiz`, `/graph`, …), in its own repo, deployed by that repo's CI. Before its first deploy it needs three things that used to be done by hand: a Cloudflare Access app guarding the prefix, its D1 database (and the id committed into `backend/wrangler.jsonc`), and the repo's GitHub `production` environment with the deploy secrets. The bundled script does all three, idempotently, and prints the plan before changing anything.
 
-The script is `scripts/portfolio-app.mjs`, next to this file. Run it with `node` (Node 20+); it is also the `portfolio-app` npm bin.
+The script is `scripts/portfolio-app.mjs`, next to this file. Run it with `node` (Node 20+); it is also the `portfolio-app` bin of the npm package `@akshaydev17/portfolio-app`.
 
 ## Inputs
 
@@ -35,7 +35,7 @@ One-time machine setup (config file and the two keychain entries) is in the pack
    *Done when the change is on a branch headed for review.*
 
 5. **Gate the deploy on the login check.** The first step of the repo's deploy job should be:
-   `npx -y portfolio-app verify --domain akshayprabhakant.com --team shiny-moon-6b37 --path /<prefix>`
+   `npx -y @akshaydev17/portfolio-app@0.1.0 verify --domain akshayprabhakant.com --team shiny-moon-6b37 --path /<prefix>`
    (or `node <path>/portfolio-app.mjs verify …` until the package is on npm). It needs no secrets and exits non-zero unless both `/<prefix>` and a path under it redirect to Access.
    *Done when the deploy workflow runs `verify` before any deploy step.*
 

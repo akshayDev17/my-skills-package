@@ -20,7 +20,7 @@
       "description": "Bootstrap a sub-app of a personal site on Cloudflare — its Access app for the path, its D1 database id and its GitHub production secrets — plus a token-free login check every deploy job can run first.",
       "source": {
         "source": "npm",
-        "package": "portfolio-app",
+        "package": "@akshaydev17/portfolio-app",
         "version": "^0.1.0"
       },
       "category": "Productivity"

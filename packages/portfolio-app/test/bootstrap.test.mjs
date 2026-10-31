@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyBootstrap, formatPlan, planBootstrap } from "../skills/portfolio-app/scripts/lib/bootstrap.mjs";
+import { POLICY_NAME } from "../skills/portfolio-app/scripts/lib/local.mjs";
 import { main } from "../skills/portfolio-app/scripts/portfolio-app.mjs";
 import {
   ACCOUNT, DEPLOY_TOKEN, DOMAIN, SETUP_TOKEN, TEAM, WRANGLER_WITH_PLACEHOLDER,
@@ -114,7 +115,7 @@ test("the setup token goes to Cloudflare only, and only the deploy token goes to
 
 test("existing pieces are reused, not recreated", async () => {
   const world = freshWorld();
-  world.site.policies.push({ id: "pol-x", name: config.policyName, reusable: true, include: [{ email: { email: "owner@example.com" } }] });
+  world.site.policies.push({ id: "pol-x", name: POLICY_NAME, reusable: true, include: [{ email: { email: "owner@example.com" } }] });
   world.site.apps.push({ id: "app-x", name: "graph", destinations: [{ uri: `${DOMAIN}/graph` }, { uri: `${DOMAIN}/graph/*` }], policies: [{ id: "pol-x" }] });
   world.site.protected.push("/graph");
   world.site.d1.push({ uuid: "existing-db-uuid", name: "graph-notes" });
@@ -136,7 +137,7 @@ test("existing pieces are reused, not recreated", async () => {
 
 test("a policy whose emails drifted from the config is reported, never rewritten", async () => {
   const world = freshWorld();
-  world.site.policies.push({ id: "pol-x", name: config.policyName, include: [{ email: { email: "someone@else.com" } }] });
+  world.site.policies.push({ id: "pol-x", name: POLICY_NAME, include: [{ email: { email: "someone@else.com" } }] });
   const h = harness(world);
   const actions = await planBootstrap(h.deps, { repo: REPO, prefix: PREFIX, cloneDir: makeClone(), config });
   const warn = actions.find((a) => a.kind === "policy-emails");

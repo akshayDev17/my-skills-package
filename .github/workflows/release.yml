@@ -19,7 +19,7 @@ on:
         required: true
         type: choice
         default: "coursework-author"
-        options: ["coursework-author", "portfolio-app"]
+        options: ["coursework-author", "@akshaydev17/portfolio-app"]
       bump:
         description: "Semver increment (ignored if you set an explicit version)"
         required: true
@@ -73,8 +73,9 @@ jobs:
           VERSION_OVERRIDE: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          DIR="packages/$PKG"
+          DIR="packages/${PKG##*/}"
           [ -d "$DIR" ] || { echo "no such package: $PKG"; exit 1; }
+          [ "$(node -p "require('./$DIR/package.json').name")" = "$PKG" ] || { echo "$DIR is not $PKG"; exit 1; }
 
           CURRENT=$(git describe --tags --abbrev=0 --match "$PKG@*" 2>/dev/null || true)
           CURRENT=${CURRENT#"$PKG@"}

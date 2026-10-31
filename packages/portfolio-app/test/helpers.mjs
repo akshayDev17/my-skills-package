@@ -16,7 +16,6 @@ export const config = {
   accountId: ACCOUNT,
   team: TEAM,
   allowedEmails: ["owner@example.com"],
-  policyName: "portfolio-app sign-in",
 };
 
 const jsonResponse = (status, body) => ({

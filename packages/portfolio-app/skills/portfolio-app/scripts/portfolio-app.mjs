@@ -46,7 +46,7 @@ function prefixArg(raw) {
 
 function loadConfig(path, run) {
   if (!existsSync(path)) {
-    throw new UsageError(`no config at ${path} — see the README for its schema (or pass --config / set PORTFOLIO_APP_CONFIG)`);
+    throw new UsageError(`no config at ${path} — see the README for its schema (or pass --config)`);
   }
   if (isInsideGitWorkTree(run, path)) {
     throw new UsageError(`${path} is inside a git work tree; keep the config outside any repo so it cannot be committed`);

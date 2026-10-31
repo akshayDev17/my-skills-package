@@ -17,6 +17,7 @@ import { join, resolve } from "node:path";
 const ROOT = resolve(import.meta.dirname, "..");
 
 const readJson = async (path) => JSON.parse(await readFile(path, "utf8"));
+const unscoped = (name) => name?.replace(/^@[^/]+\//, "");
 
 async function packageDirs() {
   const entries = await readdir(join(ROOT, "packages"), { withFileTypes: true });
@@ -58,7 +59,7 @@ for (const dir of await packageDirs()) {
   }
 
   const versions = new Set(manifests.map((m) => m.json.version));
-  const names = new Set(manifests.map((m) => m.json.name));
+  const names = new Set(manifests.map((m) => unscoped(m.json.name)));
   if (versions.size > 1) {
     fail(`version drift: ${manifests.map((m) => `${m.file}=${m.json.version}`).join(", ")}`);
   }

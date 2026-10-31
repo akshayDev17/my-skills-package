@@ -25,6 +25,7 @@ import {
   DEPLOY_TOKEN_ACCOUNT,
   GITHUB_ENVIRONMENT,
   KEYCHAIN_SERVICE,
+  POLICY_NAME,
   cloneRepo,
   ghCreateEnvironment,
   ghEnvironmentExists,
@@ -40,7 +41,7 @@ async function planAccess({ cf, fetch }, { repo, prefix, config }) {
   const actions = [];
   const uris = accessDestinations(config.domain, prefix);
 
-  const policy = await findReusablePolicy(cf, config.policyName);
+  const policy = await findReusablePolicy(cf, POLICY_NAME);
   if (policy) {
     actions.push({ step: "access", kind: "policy", state: "ok", policyId: policy.id,
       summary: `reusable policy "${policy.name}" exists` });
@@ -50,8 +51,8 @@ async function planAccess({ cf, fetch }, { repo, prefix, config }) {
         summary: `policy "${policy.name}" allows [${emails.join(", ")}], config says [${config.allowedEmails.join(", ")}] — left unchanged; edit it in the Zero Trust dashboard if that is intended` });
     }
   } else {
-    actions.push({ step: "access", kind: "policy", state: "create", name: config.policyName, emails: config.allowedEmails,
-      summary: `create reusable policy "${config.policyName}" (allow: ${config.allowedEmails.join(", ")})` });
+    actions.push({ step: "access", kind: "policy", state: "create", name: POLICY_NAME, emails: config.allowedEmails,
+      summary: `create reusable policy "${POLICY_NAME}" (allow: ${config.allowedEmails.join(", ")})` });
   }
 
   const touching = await findAppsTouching(cf, uris);
@@ -68,12 +69,12 @@ async function planAccess({ cf, fetch }, { repo, prefix, config }) {
     const attached = (app.policies ?? []).some((p) => policy && p.id === policy.id);
     if (!attached) {
       actions.push({ step: "access", kind: "app-policy", state: "warn",
-        summary: `Access app "${app.name}" is not attached to policy "${config.policyName}" — left unchanged` });
+        summary: `Access app "${app.name}" is not attached to policy "${POLICY_NAME}" — left unchanged` });
     }
   } else {
     const name = `${repo.split("/")[1]} (${prefix})`;
     actions.push({ step: "access", kind: "app", state: "create", name, uris,
-      summary: `create self-hosted Access app "${name}" — destinations ${uris.join(" + ")}, policy "${config.policyName}"` });
+      summary: `create self-hosted Access app "${name}" — destinations ${uris.join(" + ")}, policy "${POLICY_NAME}"` });
   }
 
   const now = await verifyPath({ fetch, domain: config.domain, prefix, team: config.team });

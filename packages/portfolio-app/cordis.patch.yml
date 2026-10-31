@@ -1,0 +1,4 @@
+# Mounts this package's skill provider into the DSH composition.
+- insert:
+    - id: portfolio-app
+      name: './lib/index.js'

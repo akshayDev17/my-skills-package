@@ -95,6 +95,17 @@ jobs:
           echo "::error title=marketplace pins stale::${msg:-no detail (see log)}"
           exit 1
 
+      # A package that ships code carries its own tests under test/, which never ship
+      # (see ALLOWED_UNSHIPPED in check-package-contents.mjs). They stub every network
+      # and CLI call, so they need no credentials.
+      - name: Package tests
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          tests=(packages/*/test/*.test.mjs)
+          [ ${#tests[@]} -gt 0 ] || { echo "no package tests found"; exit 0; }
+          node --test "${tests[@]}"
+
       - name: Scripts parse
         run: |
           set -euo pipefail

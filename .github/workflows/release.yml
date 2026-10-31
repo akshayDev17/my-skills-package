@@ -19,7 +19,7 @@ on:
         required: true
         type: choice
         default: "coursework-author"
-        options: ["coursework-author"]
+        options: ["coursework-author", "portfolio-app"]
       bump:
         description: "Semver increment (ignored if you set an explicit version)"
         required: true

@@ -222,6 +222,8 @@ test("cli bootstrap --apply carries the plan out", async () => {
   const world = freshWorld();
   const r = await cli(world, ["bootstrap", "--repo", REPO, "--path", PREFIX, "--clone", makeClone(), "--config", writeConfig(), "--apply"]);
   assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /— applying/);
+  assert.doesNotMatch(r.out, /plan only/);
   assert.equal(world.site.apps.length, 1);
   assert.ok(!r.out.includes(SETUP_TOKEN) && !r.out.includes(DEPLOY_TOKEN));
 });

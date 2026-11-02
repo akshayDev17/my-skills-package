@@ -95,3 +95,29 @@ export function d1Target(config, d1Flag) {
   if (entries.length === 0) return { state: "none" };
   return { state: "present", name: [...new Set(entries.map((e) => e.database_name))].join(", ") };
 }
+
+/** R2's rule for bucket names: 3–63 lowercase letters, digits and hyphens, alphanumeric at both ends. */
+const R2_BUCKET_NAME = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/;
+
+/**
+ * Which R2 bucket bootstrap should ensure for this config. R2 bindings carry no id, so
+ * there is no placeholder: the bucket is the one `r2_buckets` names.
+ *   { state: "none" }                       no R2 binding, nothing to do
+ *   { state: "wanted", name }               ensure bucket `name` exists
+ *   { state: "conflict", reason }           ambiguous or inconsistent; a human decides
+ */
+export function r2Target(config) {
+  const entries = config.r2_buckets ?? [];
+  if (entries.some((e) => !e.bucket_name)) {
+    return { state: "conflict", reason: "an r2_buckets entry has no bucket_name" };
+  }
+  const names = [...new Set(entries.map((e) => e.bucket_name))];
+  if (names.length === 0) return { state: "none" };
+  if (names.length > 1) {
+    return { state: "conflict", reason: `r2_buckets name several buckets (${names.join(", ")}); bootstrap handles one per app` };
+  }
+  if (!R2_BUCKET_NAME.test(names[0])) {
+    return { state: "conflict", reason: `bucket_name "${names[0]}" is not a valid R2 bucket name (3–63 lowercase letters, digits or hyphens)` };
+  }
+  return { state: "wanted", name: names[0] };
+}

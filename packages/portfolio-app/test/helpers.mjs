@@ -30,9 +30,12 @@ const plain = (status) => ({ ok: status < 300, status, headers: new Map() });
 
 export const ACCESS_LOGIN = `https://${TEAM}.cloudflareaccess.com/cdn-cgi/access/login/${DOMAIN}?kid=abc`;
 
+const denied = () => jsonResponse(403, { success: false, errors: [{ code: 10000, message: "Authentication error" }] });
+
 /**
  * A fake Cloudflare account plus the public site. `state` is mutated by POSTs so an
- * apply followed by a plan sees what apply created.
+ * apply followed by a plan sees what apply created. `state.deny` lists the API areas
+ * ("r2", "zone", "routes", "scripts") the setup token has no permission for.
  */
 export function fakeFetch(state) {
   const calls = [];
@@ -47,10 +50,9 @@ export function fakeFetch(state) {
         ? redirect(ACCESS_LOGIN)
         : plain(200);
     }
-    if (init.headers?.Authorization !== `Bearer ${SETUP_TOKEN}`) {
-      return jsonResponse(403, { success: false, errors: [{ code: 10000, message: "Authentication error" }] });
-    }
+    if (init.headers?.Authorization !== `Bearer ${SETUP_TOKEN}`) return denied();
     const path = u.pathname.replace("/client/v4", "");
+    const deny = state.deny ?? [];
     const base = `/accounts/${ACCOUNT}`;
     const list = (items) => jsonResponse(200, { success: true, result: items, result_info: { page: 1, total_pages: 1 } });
 
@@ -75,6 +77,38 @@ export function fakeFetch(state) {
       const db = { uuid: `00000000-0000-4000-8000-00000000000${state.d1.length + 1}`, ...JSON.parse(init.body) };
       state.d1.push(db);
       return jsonResponse(200, { success: true, result: db });
+    }
+    const bucket = path.match(new RegExp(`^${base}/r2/buckets/([^/]+)$`));
+    if ((bucket || path === `${base}/r2/buckets`) && deny.includes("r2")) return denied();
+    if (bucket && method === "GET") {
+      const found = state.r2.find((b) => b.name === decodeURIComponent(bucket[1]));
+      return found ? jsonResponse(200, { success: true, result: found })
+        : jsonResponse(404, { success: false, errors: [{ code: 10006, message: "The specified bucket does not exist." }] });
+    }
+    if (path === `${base}/r2/buckets` && method === "POST") {
+      const created = { creation_date: "2026-11-02T00:00:00Z", ...JSON.parse(init.body) };
+      state.r2.push(created);
+      return jsonResponse(200, { success: true, result: created });
+    }
+    if (path === "/zones" && method === "GET") {
+      // A token without Zone Read is not refused here; it just sees no zones.
+      return list(deny.includes("zone") ? [] : state.zones.filter((z) => z.name === u.searchParams.get("name")));
+    }
+    const routes = path.match(/^\/zones\/([^/]+)\/workers\/routes$/);
+    if (routes && deny.includes("routes")) return denied();
+    if (routes && method === "GET") return jsonResponse(200, { success: true, result: state.routes });
+    if (routes && method === "POST") {
+      const body = JSON.parse(init.body);
+      if (!state.scripts.includes(body.script)) {
+        return jsonResponse(400, { success: false, errors: [{ code: 10019, message: "workers.api.error.invalid_route_script_missing" }] });
+      }
+      const route = { id: `route-${state.routes.length + 1}`, ...body };
+      state.routes.push(route);
+      return jsonResponse(200, { success: true, result: route });
+    }
+    if (path === `${base}/workers/scripts` && method === "GET") {
+      if (deny.includes("scripts")) return denied();
+      return jsonResponse(200, { success: true, result: state.scripts.map((id) => ({ id })) });
     }
     return jsonResponse(404, { success: false, errors: [{ code: 7003, message: `no route ${method} ${path}` }] });
   };
@@ -146,11 +180,30 @@ export function makeClone(wranglerText = WRANGLER_WITH_PLACEHOLDER) {
 /** A fresh account with nothing set up, and a clone of the repo. */
 export function freshWorld() {
   return {
-    site: { policies: [], apps: [], d1: [], protected: [] },
+    site: { policies: [], apps: [], d1: [], protected: [], r2: [], zones: [{ id: "zone-1", name: DOMAIN }], routes: [], scripts: [] },
     local: {
       keychain: { "cloudflare-setup-token": SETUP_TOKEN, "cloudflare-deploy-token": DEPLOY_TOKEN },
       remote: "git@github.com:owner/graph-notes.git",
       github: { environment: false, secrets: [] },
     },
   };
+}
+
+export const WRANGLER_PUBLIC = `{
+\t"name": "election-atlas",
+\t"d1_databases": [
+\t\t{ "binding": "DB", "database_name": "election-atlas", "database_id": "REPLACE_AFTER_d1_create" }
+\t],
+\t// Bill PDFs.
+\t"r2_buckets": [{ "binding": "BILLS", "bucket_name": "election-atlas-bills" }]
+}
+`;
+
+/** A fresh account with the home site's Worker on `<domain>/*`, and a clone of a public app's repo. */
+export function freshPublicWorld() {
+  const world = freshWorld();
+  world.site.routes.push({ id: "route-home", pattern: `${DOMAIN}/*`, script: "home-site" });
+  world.site.scripts.push("home-site");
+  world.local.remote = "https://github.com/owner/election-atlas.git";
+  return world;
 }

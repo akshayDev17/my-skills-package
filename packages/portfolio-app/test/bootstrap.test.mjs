@@ -267,3 +267,53 @@ test("cli verify needs no token or config and exits by the redirect", async () =
   assert.equal(fail.code, 1);
   assert.match(fail.out, /NOT behind Cloudflare Access/);
 });
+
+// --- private mode is unchanged by --public ------------------------------------------
+
+test("regression: without --public, a fresh private plan, its apply and its Cloudflare calls are exactly as before", async () => {
+  const world = freshWorld();
+  const cloneDir = makeClone();
+  const h = harness(world);
+  const opts = { repo: REPO, prefix: PREFIX, cloneDir, config };
+  const actions = await planBootstrap(h.deps, opts);
+  assert.equal(formatPlan(actions, { ...opts, apply: false }).replaceAll(cloneDir, "<CLONE>"), [
+    "portfolio-app bootstrap owner/graph-notes /graph — plan only; nothing changes without --apply",
+    "Cloudflare Access",
+    `  + create reusable policy "portfolio-app sign-in" (allow: owner@example.com)`,
+    `  + create self-hosted Access app "graph-notes (/graph)" — destinations example.com/graph + example.com/graph/*, policy "portfolio-app sign-in"`,
+    "  · now: https://example.com/graph answered 200 — not behind Access; https://example.com/graph/portfolio-app-verify answered 200 — not behind Access",
+    "D1",
+    `  + create D1 database "graph-notes"`,
+    "  + write database_id into <CLONE>/backend/wrangler.jsonc (replaces REPLACE_AFTER_d1_create); commit it through the normal delivery path",
+    "GitHub owner/graph-notes",
+    "  + create environment production",
+    "  + set secret CLOUDFLARE_API_TOKEN from keychain portfolio-app/cloudflare-deploy-token (the narrow deploy token)",
+    "  + set secret CLOUDFLARE_ACCOUNT_ID from config accountId",
+    "7 change(s) planned",
+  ].join("\n"));
+
+  await applyBootstrap(h.deps, actions, opts);
+  assert.deepEqual(h.logs.map((l) => l.replaceAll(cloneDir, "<CLONE>")), [
+    `  + created reusable policy "portfolio-app sign-in"`,
+    `  + created Access app "graph-notes (/graph)"`,
+    `  ✓ /graph redirects to ${TEAM}.cloudflareaccess.com`,
+    `  + created D1 database "graph-notes" (00000000-0000-4000-8000-000000000001)`,
+    "  + wrote database_id into <CLONE>/backend/wrangler.jsonc — commit it through the normal delivery path",
+    "  + created environment production on owner/graph-notes",
+    "  + set secret CLOUDFLARE_API_TOKEN on owner/graph-notes/production",
+    "  + set secret CLOUDFLARE_ACCOUNT_ID on owner/graph-notes/production",
+  ]);
+  const api = `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}`;
+  assert.deepEqual(h.http.calls.map((c) => `${c.method} ${c.url}`), [
+    `GET ${api}/access/policies?per_page=1000&page=1`,
+    `GET ${api}/access/apps?per_page=1000&page=1`,
+    `GET https://${DOMAIN}/graph`,
+    `GET https://${DOMAIN}/graph/portfolio-app-verify`,
+    `GET ${api}/d1/database?name=graph-notes&per_page=100&page=1`,
+    `POST ${api}/access/policies`,
+    `POST ${api}/access/apps`,
+    `GET https://${DOMAIN}/graph`,
+    `GET https://${DOMAIN}/graph/portfolio-app-verify`,
+    `POST ${api}/d1/database`,
+  ], "no R2, zone or route call in private mode");
+});

@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { accessDestinations, normalizePrefix } from "../skills/portfolio-app/scripts/lib/prefix.mjs";
+import { accessDestinations, classifyRoute, normalizePrefix } from "../skills/portfolio-app/scripts/lib/prefix.mjs";
 import { checkAccessRedirect, verifyPath } from "../skills/portfolio-app/scripts/lib/verify.mjs";
-import { D1_PLACEHOLDER, d1Target, parseJsonc, replacePlaceholder } from "../skills/portfolio-app/scripts/lib/wrangler-config.mjs";
+import { D1_PLACEHOLDER, d1Target, parseJsonc, r2Target, replacePlaceholder } from "../skills/portfolio-app/scripts/lib/wrangler-config.mjs";
 import { parseConfig, repoFromRemote } from "../skills/portfolio-app/scripts/lib/local.mjs";
 import { ACCESS_LOGIN, DOMAIN, TEAM, WRANGLER_WITH_PLACEHOLDER, fakeFetch } from "./helpers.mjs";
 
@@ -11,6 +11,8 @@ test("normalizePrefix accepts sub-app prefixes and normalizes the slashes", () =
   assert.equal(normalizePrefix("quiz/"), "/quiz");
   assert.equal(normalizePrefix("/chat-archives"), "/chat-archives");
   assert.equal(normalizePrefix("/tools/graph_notes"), "/tools/graph_notes");
+  assert.equal(normalizePrefix("/work/election-atlas"), "/work/election-atlas");
+  assert.equal(normalizePrefix("work/election-atlas/"), "/work/election-atlas");
 });
 
 test("normalizePrefix refuses the site root and ai-chat-archive's site-wide routes", () => {
@@ -113,4 +115,33 @@ test("repoFromRemote reads https and ssh GitHub remotes", () => {
   assert.equal(repoFromRemote("https://github.com/owner/graph-notes.git\n"), "owner/graph-notes");
   assert.equal(repoFromRemote("https://github.com/owner/graph-notes"), "owner/graph-notes");
   assert.equal(repoFromRemote("https://gitlab.com/owner/x.git"), null);
+});
+
+test("classifyRoute places a route relative to the app's prefix", () => {
+  const at = (pattern) => classifyRoute(pattern, "example.com", "/work/election-atlas");
+  assert.equal(at("example.com/work/election-atlas"), "exact");
+  assert.equal(at("example.com/work/election-atlas/*"), "exact");
+  assert.equal(at("https://example.com/work/election-atlas/*"), "exact");
+  assert.equal(at("example.com/work/election-atlas/api/*"), "inside");
+  assert.equal(at("example.com/work/election-atlas/data.json"), "inside");
+  assert.equal(at("*example.com/work/election-atlas/*"), "inside", "a wildcard host is never the app's own pattern");
+  assert.equal(at("example.com/*"), "broader");
+  assert.equal(at("*example.com/*"), "broader");
+  assert.equal(at("example.com/work/*"), "broader");
+  assert.equal(at("example.com/work/election-atlas*"), "straddles");
+  assert.equal(at("example.com/work/election-atlas-old/*"), null);
+  assert.equal(at("example.com/work"), null);
+  assert.equal(at("example.com/quiz/*"), null);
+  assert.equal(at("*.example.com/*"), null, "a subdomain wildcard does not cover the apex");
+  assert.equal(at("other.com/*"), null);
+});
+
+test("r2Target picks one bucket per app, and says why when it cannot", () => {
+  const cfg = (...names) => ({ r2_buckets: names.map((bucket_name) => ({ binding: "B", bucket_name })) });
+  assert.deepEqual(r2Target({}), { state: "none" });
+  assert.deepEqual(r2Target(cfg("bills")), { state: "wanted", name: "bills" });
+  assert.deepEqual(r2Target(cfg("bills", "bills")), { state: "wanted", name: "bills" });
+  assert.equal(r2Target(cfg("a-1", "b-2")).state, "conflict");
+  assert.equal(r2Target({ r2_buckets: [{ binding: "B" }] }).state, "conflict");
+  assert.equal(r2Target(cfg("Bad_Name")).state, "conflict");
 });

@@ -35,3 +35,34 @@ export function normalizePrefix(raw) {
 export function accessDestinations(domain, prefix) {
   return [`${domain}${prefix}`, `${domain}${prefix}/*`];
 }
+
+/**
+ * How an existing Worker route pattern relates to the paths an app at `prefix` claims
+ * (`/<prefix>` and everything under it), on `domain`:
+ *   "exact"    one of the app's own two patterns
+ *   "inside"   matches only paths under the prefix
+ *   "broader"  a wildcard ending above the prefix (such as the home `/*`); the app's
+ *              longer patterns are more specific, so they win under the prefix
+ *   "straddles" matches paths both under the prefix and outside it, at its level
+ *   null       never matches a path the app claims (or another host)
+ * A route pattern is `[scheme://]host/path`, with an optional `*` at the start of the
+ * host and at the end of the path; nothing else is a wildcard.
+ */
+export function classifyRoute(pattern, domain, prefix) {
+  const bare = pattern.replace(/^https?:\/\//, "");
+  const slash = bare.indexOf("/");
+  const host = slash === -1 ? bare : bare.slice(0, slash);
+  const path = slash === -1 ? "/" : bare.slice(slash);
+  if (host !== domain && !(host.startsWith("*") && domain.endsWith(host.slice(1)))) return null;
+
+  const claimed = (p) => p === prefix || p.startsWith(`${prefix}/`);
+  if (!path.endsWith("*")) {
+    if (!claimed(path)) return null;
+    return host === domain && path === prefix ? "exact" : "inside";
+  }
+  const base = path.slice(0, -1);
+  if (host === domain && base === `${prefix}/`) return "exact";
+  if (base.startsWith(`${prefix}/`)) return "inside";
+  if (prefix.startsWith(base)) return base.length < prefix.length ? "broader" : "straddles";
+  return null;
+}

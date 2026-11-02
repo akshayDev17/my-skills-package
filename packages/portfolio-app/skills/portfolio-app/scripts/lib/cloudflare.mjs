@@ -1,5 +1,6 @@
-// Cloudflare v4 API calls for the two resources bootstrap manages: Access (reusable
-// policies + self-hosted apps) and D1 databases. Every function takes `cf` —
+// Cloudflare v4 API calls for the resources bootstrap manages: Access (reusable
+// policies + self-hosted apps), D1 databases, R2 buckets and Worker routes. Every
+// function takes `cf` —
 // `{ fetch, token, accountId }` — explicitly, so tests stub `fetch` and nothing else.
 //
 // The token goes into the Authorization header and nowhere else: errors carry the
@@ -11,6 +12,11 @@
 //                      the deprecated `self_hosted_domains`; `policies: [{ id, precedence }]`
 //                      links reusable policies, and reusable + inline are mutually exclusive.
 //   D1                 GET/POST /accounts/{id}/d1/database
+//   R2                 GET /accounts/{id}/r2/buckets/{name}, POST /accounts/{id}/r2/buckets
+//   zones              GET /zones?name=<domain>
+//   Worker routes      GET/POST /zones/{zone_id}/workers/routes — `{ pattern, script }`
+//   Worker scripts     GET /accounts/{id}/workers/scripts — a route can only name a
+//                      deployed script (creating one for a missing script is refused)
 
 const API = "https://api.cloudflare.com/client/v4";
 
@@ -28,7 +34,8 @@ export async function cfRequest(cf, method, path, body) {
   }
   if (!res.ok || !json?.success) {
     const detail = json?.errors?.map((e) => `${e.code}: ${e.message}`).join("; ") || `HTTP ${res.status}`;
-    throw new Error(`Cloudflare ${method} ${path.split("?")[0]} failed — ${detail}`);
+    // `status` lets callers tell "not found" and "not allowed" apart from other failures.
+    throw Object.assign(new Error(`Cloudflare ${method} ${path.split("?")[0]} failed — ${detail}`), { status: res.status });
   }
   return json;
 }
@@ -98,4 +105,39 @@ export async function findD1(cf, name) {
 export async function createD1(cf, name) {
   const json = await cfRequest(cf, "POST", `/accounts/${cf.accountId}/d1/database`, { name });
   return json.result;
+}
+
+/** The bucket, or null when it does not exist (Cloudflare answers 404). */
+export async function findR2Bucket(cf, name) {
+  try {
+    return (await cfRequest(cf, "GET", `/accounts/${cf.accountId}/r2/buckets/${encodeURIComponent(name)}`)).result;
+  } catch (err) {
+    if (err.status === 404) return null;
+    throw err;
+  }
+}
+
+export async function createR2Bucket(cf, name) {
+  const json = await cfRequest(cf, "POST", `/accounts/${cf.accountId}/r2/buckets`, { name });
+  return json.result;
+}
+
+/** The zone for `domain`, or null when the token cannot see it (the list is filtered, not refused). */
+export async function findZone(cf, domain) {
+  const zones = await cfListAll(cf, "/zones", { name: domain, per_page: "50" });
+  return zones.find((z) => z.name === domain) ?? null;
+}
+
+export async function listWorkerRoutes(cf, zoneId) {
+  return (await cfRequest(cf, "GET", `/zones/${zoneId}/workers/routes`)).result ?? [];
+}
+
+export async function createWorkerRoute(cf, zoneId, { pattern, script }) {
+  const json = await cfRequest(cf, "POST", `/zones/${zoneId}/workers/routes`, { pattern, script });
+  return json.result;
+}
+
+export async function workerExists(cf, name) {
+  const scripts = (await cfRequest(cf, "GET", `/accounts/${cf.accountId}/workers/scripts`)).result ?? [];
+  return scripts.some((s) => s.id === name);
 }

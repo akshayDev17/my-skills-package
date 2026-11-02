@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // portfolio-app — set up a new sub-app of the site, and check that it is behind Access.
 //
-//   portfolio-app bootstrap --repo <owner/name> --path /<prefix> [--d1 <name>] [--clone <dir>] [--apply]
+//   portfolio-app bootstrap --repo <owner/name> --path /<prefix> [--public] [--d1 <name>] [--clone <dir>] [--apply]
 //   portfolio-app verify --path /<prefix> [--domain <host>] [--team <team>]
 //
 // This file only wires the real world (fetch, child processes, the filesystem) into the
@@ -19,10 +19,13 @@ import { applyBootstrap, formatPlan, planBootstrap } from "./lib/bootstrap.mjs";
 import { SETUP_TOKEN_ACCOUNT, defaultConfigPath, isInsideGitWorkTree, keychainRead, parseConfig } from "./lib/local.mjs";
 
 const USAGE = `usage:
-  portfolio-app bootstrap --repo <owner/name> --path /<prefix> [--d1 <name>] [--clone <dir>] [--config <file>] [--apply]
-      Plans (default) or applies (--apply) the three setup steps for a sub-app:
+  portfolio-app bootstrap --repo <owner/name> --path /<prefix> [--public] [--d1 <name>]
+                          [--clone <dir>] [--config <file>] [--apply]
+      Plans (default) or applies (--apply) the setup steps for a sub-app:
       a Cloudflare Access app for the path, its D1 database id in backend/wrangler.jsonc,
       and the GitHub "production" environment secrets.
+      --public makes the path reachable by anyone: no Access step; instead the R2 bucket
+      named in wrangler.jsonc and Worker routes for exactly /<prefix> and /<prefix>/*.
   portfolio-app verify --path /<prefix> [--domain <host>] [--team <team>] [--config <file>]
       Exits 0 only when the path redirects to Cloudflare Access. Needs no token.
 
@@ -79,7 +82,8 @@ async function bootstrapCommand(values, { fetch, run, log }) {
   const prefix = prefixArg(values.path);
   const config = loadConfig(values.config ?? defaultConfigPath(), run);
   const cf = { fetch, accountId: config.accountId, token: keychainRead(run, SETUP_TOKEN_ACCOUNT) };
-  const opts = { repo: values.repo, prefix, cloneDir: resolve(values.clone ?? "."), d1Flag: values.d1, config };
+  const opts = { repo: values.repo, prefix, cloneDir: resolve(values.clone ?? "."), d1Flag: values.d1,
+    public: values.public, config };
 
   const actions = await planBootstrap({ cf, run, fetch }, opts);
   const hasConflict = actions.some((a) => a.state === "conflict");
@@ -102,6 +106,7 @@ export async function main(argv, deps) {
         repo: { type: "string" },
         path: { type: "string" },
         d1: { type: "string" },
+        public: { type: "boolean", default: false },
         clone: { type: "string" },
         config: { type: "string" },
         domain: { type: "string" },

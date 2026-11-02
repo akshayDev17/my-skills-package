@@ -181,13 +181,12 @@ async function planD1({ cf }, { d1Flag }, clone) {
   ];
 }
 
-/** Private apps get an R2 step only when `--r2` asks for one; public apps also read it from the clone. */
-async function planR2({ cf }, { r2Flag, public: isPublic }, clone) {
-  if (!isPublic && !r2Flag) return [];
+/** Public apps only: the single bucket the clone's `r2_buckets` names. */
+async function planR2({ cf }, clone) {
   const action = (state, summary, extra = {}) => ({ step: "r2", kind: "r2-bucket", state, summary, ...extra });
   if (clone.problem) return [action("info", CLONE_PROBLEM)];
 
-  const target = r2Target(clone.wrangler, r2Flag);
+  const target = r2Target(clone.wrangler);
   if (target.state === "conflict") return [action("conflict", `${clone.wranglerPath}: ${target.reason}`)];
   if (target.state === "none") return [action("info", "no r2_buckets binding — nothing to do")];
 
@@ -285,14 +284,14 @@ function planGithub({ run }, { repo }) {
 
 /**
  * Read-only. `deps = { cf, run, fetch }`;
- * `opts = { repo, prefix, cloneDir, d1Flag, r2Flag, public, config }`.
+ * `opts = { repo, prefix, cloneDir, d1Flag, public, config }`.
  */
 export async function planBootstrap(deps, opts) {
   const clone = readClone(deps, opts);
   return [
     ...(opts.public ? await planPublicAccess(deps, opts) : await planAccess(deps, opts)),
     ...(await planD1(deps, opts, clone)),
-    ...(await planR2(deps, opts, clone)),
+    ...(opts.public ? await planR2(deps, clone) : []),
     ...(opts.public ? await planRoutes(deps, opts, clone) : []),
     ...planGithub(deps, opts),
   ];

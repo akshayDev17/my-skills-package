@@ -138,13 +138,10 @@ test("classifyRoute places a route relative to the app's prefix", () => {
 
 test("r2Target picks one bucket per app, and says why when it cannot", () => {
   const cfg = (...names) => ({ r2_buckets: names.map((bucket_name) => ({ binding: "B", bucket_name })) });
-  assert.deepEqual(r2Target({}, undefined), { state: "none" });
-  assert.deepEqual(r2Target(cfg("bills"), undefined), { state: "wanted", name: "bills" });
-  assert.deepEqual(r2Target(cfg("bills", "bills"), undefined), { state: "wanted", name: "bills" });
-  assert.equal(r2Target(cfg("a-1", "b-2"), undefined).state, "conflict");
-  assert.deepEqual(r2Target(cfg("a-1", "b-2"), "b-2"), { state: "wanted", name: "b-2" });
-  assert.equal(r2Target(cfg("bills"), "other").state, "conflict");
-  assert.equal(r2Target({}, "bills").state, "conflict", "--r2 needs the binding in wrangler.jsonc");
-  assert.equal(r2Target({ r2_buckets: [{ binding: "B" }] }, undefined).state, "conflict");
-  assert.equal(r2Target(cfg("Bad_Name"), undefined).state, "conflict");
+  assert.deepEqual(r2Target({}), { state: "none" });
+  assert.deepEqual(r2Target(cfg("bills")), { state: "wanted", name: "bills" });
+  assert.deepEqual(r2Target(cfg("bills", "bills")), { state: "wanted", name: "bills" });
+  assert.equal(r2Target(cfg("a-1", "b-2")).state, "conflict");
+  assert.equal(r2Target({ r2_buckets: [{ binding: "B" }] }).state, "conflict");
+  assert.equal(r2Target(cfg("Bad_Name")).state, "conflict");
 });

@@ -12,7 +12,7 @@ bin, so it runs with or without an agent. Works with Claude Code, Codex, Gemini 
 ## `bootstrap`
 
 ```sh
-portfolio-app bootstrap --repo <owner/name> --path /<prefix> [--public] [--d1 <name>] [--r2 <name>] [--clone <dir>] [--apply]
+portfolio-app bootstrap --repo <owner/name> --path /<prefix> [--public] [--d1 <name>] [--clone <dir>] [--apply]
 ```
 
 A prefix may have several segments (`/work/election-atlas`). Without `--public`, three steps,
@@ -33,11 +33,6 @@ each one only filling in what is missing:
    narrow deploy token) and `CLOUDFLARE_ACCOUNT_ID` through `gh`. Secret values go to `gh` over
    stdin, never in argv.
 
-With `--r2 <name>`, a private app also gets that R2 bucket (found by name or created) after the
-Access check, in a step between D1 and GitHub. The name must be a `bucket_name` in the clone's
-`r2_buckets`. Without `--r2`, a private app's plan has no R2 step at all, whatever
-`wrangler.jsonc` says.
-
 ### `--public`: an app anyone can reach
 
 Only `--public` makes an app public: there is no config default and nothing is inferred from
@@ -49,9 +44,8 @@ says the two destinations will be reachable by anyone. The steps, in apply order
    redirects to an Access login (a wider app such as `<domain>/work/*`), the plan is a
    conflict: the tool never removes protection.
 2. **D1**, as above.
-3. **R2.** Find the bucket by name or create it. The name is `--r2`, or else the single
-   `bucket_name` in the clone's `r2_buckets` (several names need `--r2` to pick one; none means
-   no R2 step).
+3. **R2.** Find the bucket by name or create it. The name is the single `bucket_name` in the
+   clone's `r2_buckets` (several names are a conflict; none means no R2 step).
 4. **Worker routes.** Exactly `<domain>/<prefix>` and `<domain>/<prefix>/*`, pointing at the
    Worker named by `name` in the clone's `backend/wrangler.jsonc`. A route can only name a
    deployed Worker (see the research notes), so before the first deploy the plan says so and
@@ -76,12 +70,13 @@ ok, `1` a step failed, `2` usage error or a conflict in the plan.
   - with `--public`, any Access app on the destinations, or a path that already redirects to
     an Access login;
   - a clone of a different repo;
-  - placeholder entries that name more than one database; `r2_buckets` that name several
-    buckets without `--r2`, or a `--r2` that is not among them;
+  - placeholder entries that name more than one database; with `--public`, `r2_buckets` that
+    name several buckets;
   - a Worker route that reaches into the prefix and is not the app's own: one owned by another
     Worker or by none, or one of the app's Worker that also matches paths outside the prefix
     (`<domain>/work/election-atlas*` matches `/work/election-atlas-old` too);
-  - a setup token that lacks a permission a step needs (the line names it);
+  - with `--public`, a setup token that may not read R2 buckets, the zone, its Worker routes
+    or the Worker scripts (the line names the permission; see the keychain table);
   - a missing deploy-token keychain entry.
 - **Reported but left alone (`!` or `·`):**
   - a policy whose emails differ from the config;
@@ -144,14 +139,19 @@ and are never written to a file, a log line or the plan output.
 | `portfolio-app` | `cloudflare-setup-token` | broad setup token; permissions below | Cloudflare API calls from this machine only |
 | `portfolio-app` | `cloudflare-deploy-token` | the narrow deploy token the sub-apps' CI deploys with | sent to GitHub as `CLOUDFLARE_API_TOKEN`, nothing else |
 
-The setup token's permissions, as the Cloudflare dashboard names them. A plan run whose token
-lacks one shows a `✗` line that names the missing permission.
+The setup token's permissions, as the Cloudflare dashboard names them. Only the reads a
+`--public` plan adds name a missing permission: when the token may not read the R2 bucket, the
+zone, its Worker routes or the Worker scripts, the plan shows a `✗` line naming the permission
+to add. A token missing Access or D1 permission fails the run (exit 1) with Cloudflare's error
+instead. Planning only reads, so a token that can read but not edit R2 Storage or Workers Routes
+passes the plan and is caught at `--apply`, possibly after D1 or R2 already exist; re-running
+after fixing the token resumes safely, since every step only fills in what is missing.
 
 | permission | needed for |
 |---|---|
 | Account · Access: Apps and Policies · Edit | every run: Access policy and app (a `--public` run only reads the apps) |
 | Account · D1 · Edit | every run: the D1 database |
-| Account · Workers R2 Storage · Edit | `--r2`, and `--public` when the clone binds an R2 bucket |
+| Account · Workers R2 Storage · Edit | `--public` when the clone binds an R2 bucket |
 | Zone · Zone · Read, on the site's zone | `--public`: finding the zone id for the routes |
 | Zone · Workers Routes · Edit, on the site's zone | `--public`: listing and creating the routes |
 | Account · Workers Scripts · Read | `--public`: checking the Worker is deployed before routing to it |

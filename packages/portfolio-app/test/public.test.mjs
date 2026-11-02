@@ -199,7 +199,7 @@ test("a setup token missing a permission gets a plan conflict naming it", async 
   }
 });
 
-test("--r2 picks one of several buckets; without it several are a conflict", async () => {
+test("several r2_buckets names are a plan conflict", async () => {
   const two = WRANGLER_PUBLIC.replace(
     `[{ "binding": "BILLS", "bucket_name": "election-atlas-bills" }]`,
     `[{ "binding": "BILLS", "bucket_name": "election-atlas-bills" }, { "binding": "MAPS", "bucket_name": "election-atlas-maps" }]`,
@@ -207,28 +207,9 @@ test("--r2 picks one of several buckets; without it several are a conflict", asy
   const world = deployedWorld();
   const h = harness(world);
   const ambiguous = await planBootstrap(h.deps, opts(makeClone(two)));
-  assert.match(ambiguous.find((a) => a.step === "r2").summary, /several buckets .* pass --r2 <name>/);
-  const picked = await planBootstrap(h.deps, opts(makeClone(two), { r2Flag: "election-atlas-maps" }));
-  assert.deepEqual(creates(picked).filter((c) => c.startsWith("r2")), ["r2-bucket:election-atlas-maps"]);
-});
-
-test("private apps get an R2 step only with --r2, and it runs after the Access check", async () => {
-  const world = freshPublicWorld();
-  const cloneDir = makeClone(WRANGLER_PUBLIC);
-  const h = harness(world);
-  const privateOpts = { repo: REPO, prefix: PREFIX, cloneDir, config };
-
-  const without = await planBootstrap(h.deps, privateOpts);
-  assert.ok(!without.some((a) => a.step === "r2" || a.step === "route"), "no R2 or route step by default");
-  assert.ok(!h.http.calls.some((c) => /\/r2\/|\/zones|\/workers\//.test(c.url)), "and no R2, zone or route read");
-
-  const withR2 = { ...privateOpts, r2Flag: "election-atlas-bills" };
-  const actions = await planBootstrap(h.deps, withR2);
-  assert.ok(!actions.some((a) => a.step === "route"), "routes stay public-only");
-  await applyBootstrap(h.deps, actions, withR2);
-  const order = h.logs.map((l) => l.trim().split(" ").slice(0, 3).join(" "));
-  assert.ok(order.indexOf("✓ /work/election-atlas redirects") < order.indexOf("+ created R2"), order.join(" | "));
-  assert.equal(world.site.apps.length, 1, "the private app still got its Access app");
+  const r2 = ambiguous.find((a) => a.step === "r2");
+  assert.equal(r2.state, "conflict");
+  assert.match(r2.summary, /several buckets \(election-atlas-bills, election-atlas-maps\)/);
 });
 
 // --- CLI ---------------------------------------------------------------------------
@@ -277,11 +258,8 @@ test("cli --public with an Access app on the path exits 2 and applies nothing", 
   assert.deepEqual(writes(r.http.calls), []);
 });
 
-test("cli refuses an invalid --r2 name and keeps every prefix refusal in public mode", async () => {
+test("cli keeps every prefix refusal in public mode", async () => {
   const world = deployedWorld();
-  const bad = await cli(world, ["bootstrap", "--public", "--repo", REPO, "--path", PREFIX, "--r2", "Bad_Name", "--config", writeConfig()]);
-  assert.equal(bad.code, 2);
-  assert.match(bad.err, /not a valid R2 bucket name/);
   for (const path of ["", "/", "/api", "/_next/x", "/vendors", "/work/*", "/work/a.b", "/work?x=1", "/Work"]) {
     const r = await cli(world, ["bootstrap", "--public", "--repo", REPO, "--path", path, "--config", writeConfig(), "--apply"]);
     assert.equal(r.code, 2, path);

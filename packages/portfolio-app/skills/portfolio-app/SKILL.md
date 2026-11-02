@@ -16,7 +16,6 @@ The script is `scripts/portfolio-app.mjs`, next to this file. Run it with `node`
 - **Local clone** — a checkout of that repo; the D1 id is written into its `backend/wrangler.jsonc`.
 - **D1 name** — optional; by default the `database_name` of the entry still holding `REPLACE_AFTER_d1_create`.
 - **Public or private** — private (behind Access) unless the user explicitly says the app is public. Never choose public yourself, from the repo being public, the path, or anything else. Public adds `--public`.
-- **R2 bucket name** — optional `--r2 <name>`. A private app gets an R2 step only with it; a public app otherwise uses the single `bucket_name` in `r2_buckets`.
 
 One-time machine setup (config file and the two keychain entries) is in the package README. If `bootstrap` reports a missing config or keychain entry, point the user there; never ask them to paste a token into the conversation.
 

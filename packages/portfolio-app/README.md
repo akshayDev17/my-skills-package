@@ -22,8 +22,8 @@ each one only filling in what is missing:
    `portfolio-app sign-in` that includes the config's `allowedEmails`. Then find or create a self-hosted Access
    app whose destinations are exactly `<domain>/<prefix>` and `<domain>/<prefix>/*`, attached to
    that policy. With `--apply`, it then waits until the path redirects (3xx) to
-   `<team>.cloudflareaccess.com/cdn-cgi/access/login/…`, and stops before touching GitHub if it
-   never does.
+   `<team>.cloudflareaccess.com/cdn-cgi/access/login/…`, and stops before touching D1 or GitHub
+   if it never does.
 2. **D1.** Find the database by name or create it, then write its id into the clone's
    `backend/wrangler.jsonc`, replacing the `REPLACE_AFTER_d1_create` placeholder (comments are
    preserved). The commit is left to the repo's normal delivery path. `--clone` defaults to the
@@ -71,7 +71,8 @@ ok, `1` a step failed, `2` usage error or a conflict in the plan.
     an Access login;
   - a clone of a different repo;
   - placeholder entries that name more than one database; with `--public`, `r2_buckets` that
-    name several buckets;
+    name several buckets, an entry with no `bucket_name` or an invalid one, or a
+    `wrangler.jsonc` with no `name` for the routes;
   - a Worker route that reaches into the prefix and is not the app's own: one owned by another
     Worker or by none, or one of the app's Worker that also matches paths outside the prefix
     (`<domain>/work/election-atlas*` matches `/work/election-atlas-old` too);

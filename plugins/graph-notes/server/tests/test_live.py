@@ -1,0 +1,157 @@
+"""The real thing, end to end: a real MCP client session, the server over stdio as a
+harness runs it, the saved cloudflared sign-in, and the live app.
+
+Opt-in, never in CI:  GRAPH_NOTES_LIVE=1 uv run pytest tests/test_live.py -s
+
+It touches only graphs it creates, named ``mcp-test-<time>...`` (``live_guard`` refuses
+any other slug before a call is made), leaves them in the trash, and checks at the end
+that every other graph of the account is exactly as it was. It needs a saved sign-in
+and will not start one: run ``cloudflared access login <app>`` first.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pytest
+from fastmcp import Client
+from fastmcp.client.transports import StdioTransport
+
+from graph_notes_mcp.server import APP_URL
+from live_guard import PREFIX, guarded
+
+pytestmark = pytest.mark.skipif(os.environ.get("GRAPH_NOTES_LIVE") != "1", reason="live run: set GRAPH_NOTES_LIVE=1")
+
+PROJECT = Path(__file__).resolve().parents[1]
+
+
+def others(listed: dict, trash: dict) -> list:
+    """Every graph that is not this test's: what must not change."""
+    rows = [(g["slug"], g["version"], g["title"], g["visibility"], g.get("trashed_at")) for g in listed["mine"] + trash["trash"]]
+    return sorted(row for row in rows if not row[0].startswith(PREFIX))
+
+
+async def live_run(report) -> None:
+    transport = StdioTransport(command=sys.executable, args=["-m", "graph_notes_mcp"], cwd=str(PROJECT),
+                               env={"PATH": os.environ["PATH"], "HOME": os.environ["HOME"]})
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    slug, copy = f"{PREFIX}{stamp}", f"{PREFIX}{stamp}-copy"
+
+    async with Client(transport) as mcp:
+        async def call(tool: str, **arguments):
+            result = await mcp.call_tool(tool, guarded(tool, arguments), raise_on_error=False)
+            return result
+
+        async def ok(tool: str, **arguments):
+            result = await call(tool, **arguments)
+            assert not result.is_error, f"{tool}: {result.content[0].text}"
+            return result.data
+
+        tools = {t.name for t in await mcp.list_tools()}
+        assert "trash_graph" in tools and not any("forever" in name for name in tools)
+        report(f"connected over stdio: {len(tools)} tools, protocol {mcp.protocol_version}")
+        assert "what a graph is" in (await ok("about_graphs")).lower()
+
+        before = others(await ok("list_graphs"), await ok("list_trash"))
+        report(f"{len(before)} other graphs on the account (untouched by this run)")
+        try:
+            made = await ok("create_graph", title="MCP live test (safe to delete)", slug=slug)
+            assert (made["slug"], made["version"], made["visibility"], made["mine"]) == (slug, 1, "private", True)
+            report(f"create_graph: {slug} at version 1")
+
+            added = await ok("add_notes", slug=slug, version=1, notes=[
+                {"text": "## First\nMade by the MCP live test.", "clusters": ["Live Test"], "key": "first"},
+                {"text": "Second", "clusters": ["live-test", "extra"], "key": "second"},
+                {"text": "Third"},
+            ], links=[{"from_note": "first", "to_note": "second", "label": "leads to"}])
+            first, second, third = (n["id"] for n in added["added"])
+            leads = added["links_added"][0]["id"]
+            linked = await ok("link_notes", slug=slug, version=added["version"],
+                              links=[{"from_note": second, "to_note": third, "direction": "both"}])
+            both = linked["added"][0]["id"]
+            graph = await ok("read_graph", slug=slug)
+            assert graph["version"] == 3 and [n["id"] for n in graph["notes"]] == [first, second, third]
+            assert graph["notes"][0] == {"id": first, "text": "## First\nMade by the MCP live test.", "clusters": ["live-test"]}
+            assert graph["links"] == [
+                {"id": leads, "from_note": first, "to_note": second, "direction": "forward", "label": "leads to"},
+                {"id": both, "from_note": second, "to_note": third, "direction": "both"}]
+            assert [c["name"] for c in graph["clusters"]] == ["extra", "live-test"]
+            report("add_notes, link_notes, read_graph: 3 notes, 2 links, 2 clusters read back")
+
+            updated = await ok("update_notes", slug=slug, version=3, notes=[{"id": third, "text": "Third, edited", "clusters": ["extra"]}])
+            assert updated["version"] == 4
+            graph = await ok("read_graph", slug=slug)
+            assert graph["notes"][2] == {"id": third, "text": "Third, edited", "clusters": ["extra"]}
+            assert graph["notes"][:2] == [{"id": first, "text": "## First\nMade by the MCP live test.", "clusters": ["live-test"]},
+                                          {"id": second, "text": "Second", "clusters": ["extra", "live-test"]}]
+            report("update_notes: one note changed, the others as they were")
+
+            stale = await call("add_notes", slug=slug, version=2, notes=[{"text": "from an old version"}])
+            assert stale.is_error and "Nothing was saved" in stale.content[0].text and "now at version 4" in stale.content[0].text
+            assert (await ok("read_graph", slug=slug))["version"] == 4
+            report("outdated change: refused, nothing saved, current graph returned")
+
+            await ok("unlink_notes", slug=slug, version=4, link_ids=[both])
+            removed = await ok("remove_notes", slug=slug, version=5, note_ids=[first])
+            assert removed["version"] == 6 and removed["links_removed"] == [leads]
+            graph = await ok("read_graph", slug=slug)
+            assert [n["id"] for n in graph["notes"]] == [second, third] and graph["links"] == []
+            report("unlink_notes, remove_notes: gone, with the attached link")
+
+            renamed = await ok("rename_graph", slug=slug, version=6, title="MCP live test, renamed (safe to delete)")
+            assert renamed["title"].startswith("MCP live test, renamed") and renamed["slug"] == slug and renamed["version"] == 7
+
+            history = await ok("list_history", slug=slug)
+            assert [(v["version"], v["change"]) for v in history["versions"]] == [
+                (7, "rename"), (6, "save"), (5, "save"), (4, "save"), (3, "save"), (2, "save"), (1, "create")]
+            old = await ok("read_graph", slug=slug, at_version=3)
+            assert len(old["notes"]) == 3 and len(old["links"]) == 2 and old["is_current"] is False
+            restored = await ok("restore_version", slug=slug, version=7, restore_to=3)
+            assert restored["version"] == 8 and restored["title"] == "MCP live test (safe to delete)"
+            graph = await ok("read_graph", slug=slug)
+            assert [n["id"] for n in graph["notes"]] == [first, second, third] and len(graph["links"]) == 2
+            report("rename_graph, list_history, read at a version, restore_version: version 3 is back as version 8")
+
+            public = await ok("set_visibility", slug=slug, version=8, visibility="public")
+            assert public["visibility"] == "public" and public["public_url"].endswith(f"/public?g={slug}")
+            private = await ok("set_visibility", slug=slug, version=9, visibility="private")
+            assert private["visibility"] == "private" and private["version"] == 10
+            report("set_visibility: public, then private again")
+
+            copied = await ok("copy_graph", slug=slug, title="MCP live test copy (safe to delete)", new_slug=copy)
+            assert copied["slug"] == copy and copied["visibility"] == "private"
+            copy_graph = await ok("read_graph", slug=copy)
+            assert [(n["text"], n["clusters"]) for n in copy_graph["notes"]] == [(n["text"], n["clusters"]) for n in graph["notes"]]
+            assert len(copy_graph["links"]) == 2
+            report(f"copy_graph: {copy} holds the same notes and links")
+
+            trashed = await ok("trash_graph", slug=slug)
+            assert trashed["trashed_at"]
+            assert slug in [g["slug"] for g in (await ok("list_trash"))["trash"]]
+            assert slug not in [g["slug"] for g in (await ok("list_graphs"))["mine"]]
+            back = await ok("restore_from_trash", slug=slug)
+            assert "trashed_at" not in back and slug in [g["slug"] for g in (await ok("list_graphs"))["mine"]]
+            report("trash_graph, list_trash, restore_from_trash: there and back")
+        finally:
+            for test_graph in (slug, copy):  # leave the test graphs in the trash, whatever happened above
+                await call("trash_graph", slug=test_graph)
+
+        trash = [g["slug"] for g in (await ok("list_trash"))["trash"]]
+        assert slug in trash and copy in trash
+        after = others(await ok("list_graphs"), await ok("list_trash"))
+        assert after == before, "a graph that is not this test's changed"
+        report(f"clean up: {slug} and {copy} are in the trash; the {len(after)} other graphs are exactly as before")
+
+
+def test_every_tool_against_the_live_app():
+    saved = subprocess.run(["cloudflared", "access", "token", f"-app={APP_URL}"], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+    if saved.returncode != 0:
+        pytest.fail(f"no saved sign-in: run `cloudflared access login {APP_URL}` once, then run this again", pytrace=False)
+    # Printed, not captured through a fixture: the stdio client hands the real stderr to the server (run with -s).
+    asyncio.run(live_run(lambda line: print(f"PASS | {line}", flush=True)))

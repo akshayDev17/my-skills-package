@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "graph-notes": {
+      "command": "uv",
+      "args": ["run", "--quiet", "--frozen", "--no-dev", "--project", "${CLAUDE_PLUGIN_ROOT}/server", "graph-notes-mcp"],
+      "env": { "UV_PROJECT_ENVIRONMENT": "${CLAUDE_PLUGIN_DATA}/venv" }
+    }
+  }
+}

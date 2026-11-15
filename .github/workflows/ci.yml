@@ -113,4 +113,28 @@ jobs:
           files=(scripts/*.mjs)
           [ ${#files[@]} -gt 0 ] || { echo "no scripts matched — the layout moved"; exit 1; }
           for f in "${files[@]}"; do node --check "$f"; done
+          for f in scripts/*.sh; do bash -n "$f"; done
           echo "parsed ${#files[@]} files"
+
+  # The Claude-only plugins under plugins/ ship from this repo by path, not from npm, so the
+  # npm gates above never see them.
+  path-plugins:
+    name: path plugins
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version: "22" }
+
+      # Each is listed in the Claude catalogue at its path, its manifest and skills agree, and
+      # a bundled copy (graph-notes' server/) is byte for byte the copy SERVER_SOURCE records.
+      - name: Path plugins agree with the catalogue and their recorded copies
+        run: node scripts/check-path-plugins.mjs
+
+      - uses: astral-sh/setup-uv@v7
+
+      # The command in graph-notes' .mcp.json, run as Claude Code runs it, against a stand-in
+      # app and cloudflared. The server's own suite needs graph-notes' private backend, so it
+      # runs there (and on every refresh of the copy), not here.
+      - name: graph-notes plugin starts and serves its tools
+        run: uv run --frozen --project plugins/graph-notes/server pytest -p no:cacheprovider plugins/graph-notes/test

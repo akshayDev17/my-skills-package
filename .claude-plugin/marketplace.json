@@ -3,7 +3,7 @@
   "owner": {
     "name": "akshayDev17"
   },
-  "description": "Skill plugins by akshayDev17 — one npm package per skill",
+  "description": "Skill plugins by akshayDev17 — one npm package per skill, plus Claude-only plugins delivered from this repo",
   "plugins": [
     {
       "name": "coursework-author",
@@ -23,6 +23,12 @@
         "package": "@akshaydev17/portfolio-app",
         "version": "^0.1.0"
       },
+      "category": "Productivity"
+    },
+    {
+      "name": "graph-notes",
+      "description": "Read and edit your graph-notes graphs (knowledge graphs kept as Obsidian canvases) as notes and links, through a bundled local MCP server that signs in with cloudflared. Claude Code only; needs uv and cloudflared.",
+      "source": "./plugins/graph-notes",
       "category": "Productivity"
     }
   ]

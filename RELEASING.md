@@ -65,3 +65,13 @@ publish, and finishes the commit + tag.
    scoped name (`@scope/<skill>`) still lives in `packages/<skill>/`; its tag is
    `@scope/<skill>@<semver>`.
 4. Register its trusted publisher (above).
+
+## Claude-only plugins under `plugins/`
+
+A plugin under `plugins/` (such as `graph-notes`) has no npm package, tag or release run. Claude
+Code installs it from this repo's default branch, by the path its entry in
+`.claude-plugin/marketplace.json` names (`"source": "./plugins/<plugin>"`). Merging a change to it
+is its release. Bump `version` in its `.claude-plugin/plugin.json` whenever it changes, because
+installed copies update only when that version changes. It is not listed in
+`.agents/plugins/marketplace.json`, and `scripts/check-path-plugins.mjs` checks both catalogues
+in CI.

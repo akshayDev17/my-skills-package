@@ -14,14 +14,19 @@
 // A mixed app (`--public-path`, repeatable, never inferred) is a private app plus one
 // more Access app: "<repo name> (public)", a Bypass-for-Everyone app holding exactly the
 // listed public paths. Its Allow app is the private one, less any listed destination,
-// and apply waits until the private paths (a child of each exact public path among
-// them) redirect to the login and the public ones answer signed out. It never edits,
-// narrows or moves a destination out of an existing app; anything in the way is a
-// conflict.
+// plus a narrowing `<path>/*` for each exact public path but the bare prefix, so the
+// children of that path ask for sign-in rather than inherit its Bypass. Apply waits until
+// the private paths (a child of each exact public path among them) redirect to the login
+// and the public ones answer signed out. The one change it makes to an existing app is
+// adding missing narrowing destinations to the Allow app, which only shrinks what is
+// public; it never removes or alters a destination, or moves one out of an existing app,
+// and anything else in the way is a conflict.
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { accessDestinations, classifyRoute, privateDestinations, publicDestinations } from "./prefix.mjs";
+import {
+  accessDestinations, allowDestinations, classifyRoute, narrowingDestinations, privateDestinations, publicDestinations,
+} from "./prefix.mjs";
 import { verifyPath, waitForAccess } from "./verify.mjs";
 import {
   appPolicies,
@@ -34,14 +39,16 @@ import {
   findAppsTouching,
   findD1,
   findR2Bucket,
-  findReusablePolicy,
   findZone,
+  getAccessApp,
   isBypassEveryone,
   listAccessApps,
   listAccessPolicies,
   listWorkerRoutes,
   pickReusablePolicy,
   policyEmails,
+  updateAccessApp,
+  withAddedDestinations,
   workerExists,
 } from "./cloudflare.mjs";
 import { D1_PLACEHOLDER, d1Target, parseJsonc, r2Target, replacePlaceholder } from "./wrangler-config.mjs";
@@ -80,11 +87,31 @@ async function readWithScope(scope, what, read) {
   }
 }
 
+/**
+ * Why `app` cannot take the narrowing destinations by a plain PUT, or null if it can:
+ * a self-hosted app whose paths are all public `destinations`, with no Bypass policy.
+ */
+function narrowingRefusal(app, policies) {
+  if ((app.type ?? "self_hosted") !== "self_hosted") return `it is a ${app.type} app, not self-hosted`;
+  if (!(app.destinations ?? []).length) return "its paths are in the deprecated self_hosted_domains, not destinations";
+  if (app.destinations.some((d) => (d.type ?? "public") !== "public")) return "it holds a destination that is not a public hostname";
+  if (appPolicies(app, policies).some((p) => p.decision === "bypass")) return "it has a Bypass policy, so a destination added to it would not ask for sign-in";
+  return null;
+}
+
+/**
+ * The Allow app. For a mixed app it holds the base destinations plus a narrowing
+ * destination per exact public path (see prefix.mjs). An existing app holding the base
+ * ones and only some of the narrowing ones gets the rest added: the one change the tool
+ * makes to an existing app, because it only shrinks what is public.
+ */
 async function planAccess({ cf }, { repo, prefix, config, publicPaths = [] }) {
   const actions = [];
-  const uris = privateDestinations(config.domain, prefix, publicPaths);
+  const base = privateDestinations(config.domain, prefix, publicPaths);
+  const uris = allowDestinations(config.domain, prefix, publicPaths);
 
-  const policy = await findReusablePolicy(cf, POLICY_NAME);
+  const policies = await listAccessPolicies(cf);
+  const policy = pickReusablePolicy(policies, POLICY_NAME);
   if (policy) {
     actions.push({ step: "access", kind: "policy", state: "ok", policyId: policy.id,
       summary: `reusable policy "${policy.name}" exists` });
@@ -99,7 +126,9 @@ async function planAccess({ cf }, { repo, prefix, config, publicPaths = [] }) {
   }
 
   const touching = await findAppsTouching(cf, uris);
-  const exact = touching.filter((app) => sameSet(appUris(app), uris));
+  // Holds every base destination and nothing beyond the narrowing ones: the Allow app.
+  const fits = (app) => base.every((uri) => appUris(app).includes(uri)) && appUris(app).every((uri) => uris.includes(uri));
+  const exact = touching.filter(fits);
   const partial = touching.filter((app) => !exact.includes(app));
   if (partial.length > 0) {
     for (const app of partial) {
@@ -108,7 +137,17 @@ async function planAccess({ cf }, { repo, prefix, config, publicPaths = [] }) {
     }
   } else if (exact.length > 0) {
     const app = exact[0];
-    actions.push({ step: "access", kind: "app", state: "ok", name: app.name, summary: `Access app "${app.name}" guards ${uris.join(" + ")}` });
+    const held = appUris(app);
+    const missing = uris.filter((uri) => !held.includes(uri));
+    actions.push({ step: "access", kind: "app", state: "ok", name: app.name, summary: `Access app "${app.name}" guards ${held.join(" + ")}` });
+    const refusal = missing.length > 0 ? narrowingRefusal(app, policies) : null;
+    if (refusal) {
+      actions.push({ step: "access", kind: "app-narrowing", state: "conflict",
+        summary: `Access app "${app.name}" needs narrowing destination(s) ${missing.join(" + ")}, but ${refusal}; add them by hand` });
+    } else if (missing.length > 0) {
+      actions.push({ step: "access", kind: "app-narrowing", state: "create", name: app.name, appId: app.id, held, uris: missing,
+        summary: `add narrowing destination(s) ${missing.join(" + ")} to "${app.name}" — the paths under each exact public path ask for sign-in` });
+    }
     const attached = (app.policies ?? []).some((p) => policy && p.id === policy.id);
     if (!attached) {
       actions.push({ step: "access", kind: "app-policy", state: "warn",
@@ -131,7 +170,7 @@ async function planAccessCheck({ fetch }, { prefix, config, publicPaths = [] }) 
       : `now: ${now.results.map((r) => `${r.url} ${r.reason}`).join("; ")}` }];
 }
 
-const NEVER_MOVE = "a destination stays with the app that holds it — the tool never edits, narrows or moves one out of an existing app; fix it by hand";
+const NEVER_MOVE = "a destination stays with the app that holds it — the tool never removes, alters or moves one out of an existing app; fix it by hand";
 
 /**
  * Mixed apps only: the Bypass-for-Everyone app on exactly the listed public paths, and
@@ -197,11 +236,15 @@ function planCoverage(actions, { prefix, config, publicPaths }) {
   }
   const allow = actions.find((a) => a.kind === "app")?.name;
   const bypass = actions.find((a) => a.kind === "bypass-app" && a.state !== "info")?.name;
+  const rest = `${config.domain}${prefix}/*`;
+  const base = privateDestinations(config.domain, prefix, publicPaths);
+  const allowLine = (uri, note = "") => line(`  ${uri}${note} → "${allow}" — Allow, sign-in`);
   return [
     line(`who answers (the app with the most specific matching destination wins; Bypass lets anyone in, Allow asks for sign-in):`),
     ...publicDestinations(config.domain, publicPaths).map((uri) => line(`  ${uri} → "${bypass}" — Bypass, anyone`)),
-    ...privateDestinations(config.domain, prefix, publicPaths).map((uri) =>
-      line(`  ${uri}${uri.endsWith("*") ? " (the rest)" : ""} → "${allow}" — Allow, sign-in`)),
+    ...base.filter((uri) => uri !== rest).map((uri) => allowLine(uri)),
+    ...narrowingDestinations(config.domain, prefix, publicPaths).map((uri) => allowLine(uri, " (narrowing)")),
+    ...base.filter((uri) => uri === rest).map((uri) => allowLine(uri, " (the rest)")),
   ];
 }
 
@@ -422,10 +465,26 @@ export function formatPlan(actions, { repo, prefix, apply, public: isPublic, pub
 }
 
 /**
+ * Adds the planned narrowing destinations to the existing Allow app. The app is read
+ * again first, and an app whose paths changed since the plan is refused, since PUT
+ * replaces the whole app with what is sent.
+ */
+async function addNarrowingDestinations(cf, { appId, name, held, uris }) {
+  const current = await getAccessApp(cf, appId);
+  if (!sameSet(appUris(current), held)) {
+    throw new Error(`Access app "${name}" now guards [${appUris(current).join(", ")}], not [${held.join(", ")}] as planned; re-run the plan`);
+  }
+  const updated = await updateAccessApp(cf, appId, withAddedDestinations(current, uris));
+  const lost = [...held, ...uris].filter((uri) => !appUris(updated ?? {}).includes(uri));
+  if (lost.length > 0) throw new Error(`Access app "${name}" was updated but does not guard ${lost.join(" + ")}; check it in the Zero Trust dashboard`);
+}
+
+/**
  * Carries out the "create" actions in plan order. Refuses while any conflict stands.
  * Private: Access first, and nothing else until the path redirects to the Access login.
- * Mixed: the Allow app, then the Bypass app, and nothing else until the private paths
- * redirect to the login and the public ones answer signed out.
+ * Mixed: the Allow app (or the narrowing destinations added to the existing one), then
+ * the Bypass app, and nothing else until the private paths redirect to the login and the
+ * public ones answer signed out.
  * Public: no Access step and no login wait; Cloudflare resources, then GitHub.
  */
 export async function applyBootstrap({ cf, run, fetch, sleep, log }, actions, { prefix, repo, config, public: isPublic, publicPaths = [] }) {
@@ -445,6 +504,9 @@ export async function applyBootstrap({ cf, run, fetch, sleep, log }, actions, { 
       } else if (action.kind === "app") {
         await createSelfHostedApp(cf, { name: action.name, uris: action.uris, policyId });
         log(`  + created Access app "${action.name}"`);
+      } else if (action.kind === "app-narrowing") {
+        await addNarrowingDestinations(cf, action);
+        log(`  + added narrowing destination(s) ${action.uris.join(" + ")} to Access app "${action.name}"`);
       } else if (action.kind === "bypass-policy") {
         bypassPolicyId = (await createReusablePolicy(cf, { name: action.name, decision: "bypass", include: [{ everyone: {} }] })).id;
         log(`  + created reusable policy "${action.name}" (bypass: everyone)`);

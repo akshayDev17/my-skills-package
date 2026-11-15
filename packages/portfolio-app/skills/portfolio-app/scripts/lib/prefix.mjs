@@ -71,11 +71,30 @@ export function pathCovers(destination, path) {
 }
 
 /**
- * A mixed app's Allow destinations: the usual two, less any that is itself listed as
+ * A mixed app's base Allow destinations: the usual two, less any that is itself listed as
  * public (`/time-track` public leaves `<domain>/time-track/*` behind sign-in).
  */
 export function privateDestinations(domain, prefix, publicPaths) {
   return accessDestinations(domain, prefix).filter((uri) => !publicPaths.some((p) => `${domain}${p}` === uri));
+}
+
+/**
+ * A mixed app's narrowing destinations: `<path>/*` for each public path listed without a
+ * `/*`, so the paths under it ask for sign-in. Cloudflare lets a sub-path inherit its
+ * parent's rule, so without one an exact Bypass destination opens its children too (seen
+ * on the live account, 2026-11-15). None for the bare prefix, whose children are already
+ * the Allow app's `<prefix>/*`, nor for a path whose children a listed wildcard makes public.
+ */
+export function narrowingDestinations(domain, prefix, publicPaths) {
+  return publicPaths
+    .filter((p) => !p.endsWith("/*") && p !== prefix)
+    .filter((p) => !publicPaths.some((w) => w.endsWith("/*") && pathCovers(w, `${p}/x`)))
+    .map((p) => `${domain}${p}/*`);
+}
+
+/** Everything a mixed app's Allow app holds: the base destinations, then the narrowing ones. */
+export function allowDestinations(domain, prefix, publicPaths) {
+  return [...privateDestinations(domain, prefix, publicPaths), ...narrowingDestinations(domain, prefix, publicPaths)];
 }
 
 export function publicDestinations(domain, publicPaths) {

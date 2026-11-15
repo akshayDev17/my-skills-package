@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  accessDestinations, classifyRoute, normalizePrefix, normalizePublicPath, pathCovers, privateDestinations,
+  accessDestinations, allowDestinations, classifyRoute, narrowingDestinations, normalizePrefix, normalizePublicPath, pathCovers,
+  privateDestinations,
 } from "../skills/portfolio-app/scripts/lib/prefix.mjs";
 import { checkAccessRedirect, checkSignedOutAnswer, mixedProbes, verifyPath } from "../skills/portfolio-app/scripts/lib/verify.mjs";
-import { appPolicies, isBypassEveryone } from "../skills/portfolio-app/scripts/lib/cloudflare.mjs";
+import { appPolicies, isBypassEveryone, withAddedDestinations } from "../skills/portfolio-app/scripts/lib/cloudflare.mjs";
 import { D1_PLACEHOLDER, d1Target, parseJsonc, r2Target, replacePlaceholder } from "../skills/portfolio-app/scripts/lib/wrangler-config.mjs";
 import { parseConfig, repoFromRemote } from "../skills/portfolio-app/scripts/lib/local.mjs";
 import { ACCESS_LOGIN, DOMAIN, TEAM, WRANGLER_WITH_PLACEHOLDER, fakeFetch } from "./helpers.mjs";
@@ -168,6 +169,39 @@ test("pathCovers and privateDestinations: a public bare prefix leaves only <pref
   assert.deepEqual(privateDestinations("example.com", "/time-track", ["/time-track", "/time-track/_next/*"]), ["example.com/time-track/*"]);
   assert.deepEqual(privateDestinations("example.com", "/graph", ["/graph/public"]), ["example.com/graph", "example.com/graph/*"]);
   assert.deepEqual(privateDestinations("example.com", "/graph", []), accessDestinations("example.com", "/graph"));
+});
+
+test("narrowingDestinations: <path>/* for each exact public path, except the bare prefix and paths a listed wildcard opens", () => {
+  const graph = ["/graph/public", "/graph/public.txt", "/graph/_next/*", "/graph/icons/*", "/graph/manifest.webmanifest", "/graph/api/public/*"];
+  assert.deepEqual(narrowingDestinations("example.com", "/graph", graph),
+    ["example.com/graph/public/*", "example.com/graph/public.txt/*", "example.com/graph/manifest.webmanifest/*"]);
+  assert.deepEqual(narrowingDestinations("example.com", "/time-track", ["/time-track", "/time-track/_next/*"]), [],
+    "the bare prefix's children are the Allow app's own <prefix>/*");
+  assert.deepEqual(narrowingDestinations("example.com", "/graph", ["/graph/docs/*", "/graph/docs/readme"]), [],
+    "a path under a listed wildcard is public with its children");
+  assert.deepEqual(narrowingDestinations("example.com", "/graph", ["/graph/about", "/graph/about/*"]), [],
+    "listing <path>/* makes its children public on purpose");
+  assert.deepEqual(narrowingDestinations("example.com", "/graph", ["/graph/abo/*", "/graph/about"]), ["example.com/graph/about/*"],
+    "a wildcard covers by path segment, not by string prefix");
+  assert.deepEqual(narrowingDestinations("example.com", "/graph", []), []);
+  assert.deepEqual(allowDestinations("example.com", "/graph", ["/graph/public"]),
+    ["example.com/graph", "example.com/graph/*", "example.com/graph/public/*"]);
+  assert.deepEqual(allowDestinations("example.com", "/graph", []), accessDestinations("example.com", "/graph"));
+});
+
+test("withAddedDestinations keeps every setting and sends policies as id + precedence links", () => {
+  const app = {
+    id: "a1", name: "x", type: "self_hosted", domain: "example.com/x", session_duration: "12h", tags: ["t"],
+    destinations: [{ type: "public", uri: "example.com/x" }],
+    policies: [{ id: "p2", precedence: 2, decision: "allow", include: [] }, { id: "p1", precedence: 1 }, { id: "p3" }],
+  };
+  const before = structuredClone(app);
+  assert.deepEqual(withAddedDestinations(app, ["example.com/x/a/*"]), {
+    ...app,
+    destinations: [{ type: "public", uri: "example.com/x" }, { type: "public", uri: "example.com/x/a/*" }],
+    policies: [{ id: "p2", precedence: 2 }, { id: "p1", precedence: 1 }, { id: "p3", precedence: 3 }],
+  });
+  assert.deepEqual(app, before, "the input is not changed");
 });
 
 test("mixedProbes: private probes include the API and a child of each exact public path, and drop any a public path covers", () => {

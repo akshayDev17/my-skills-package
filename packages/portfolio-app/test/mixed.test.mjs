@@ -1,8 +1,10 @@
 // Mixed apps (--public-path): signed in by default, plus a Bypass-for-Everyone app on
-// exactly the listed public paths. Two shapes from real use: a fresh app (time-track,
-// nothing set up yet) and an app that already has its Allow app and D1 (graph-notes,
-// where only the public app is new). Every conflict test also checks that nothing is
-// written, and no existing Access app is ever edited.
+// exactly the listed public paths, and a narrowing `<path>/*` in the Allow app for each
+// exact public path. Two shapes from real use: a fresh app (time-track, nothing set up
+// yet) and an app that already has its Allow app and D1 (graph-notes, where the public
+// app is new and the Allow app gains its narrowing destinations, the one edit the tool
+// makes to an existing app). Every conflict test also checks that nothing is written.
+// The fake site lets the children of an exact destination inherit it, as Cloudflare does.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -148,74 +150,98 @@ const GN = {
   publicPaths: ["/graph/public", "/graph/public.txt", "/graph/_next/*", "/graph/icons/*", "/graph/manifest.webmanifest", "/graph/api/public/*"],
 };
 const GN_PUBLIC = GN.publicPaths.map((p) => `${DOMAIN}${p}`);
+const GN_NARROWING = ["/graph/public/*", "/graph/public.txt/*", "/graph/manifest.webmanifest/*"].map((p) => `${DOMAIN}${p}`);
 const WRANGLER_GN_DONE = WRANGLER_WITH_PLACEHOLDER.replace(`"database_id": "REPLACE_AFTER_d1_create"`, `"database_id": "11111111-2222-4333-8444-555555555555"`);
+// As the apps list returns it: policies inline, and settings the tool never set itself.
 const ALLOW_APP = {
-  id: "app-graph", name: "graph-notes (/graph)", type: "self_hosted", domain: `${DOMAIN}/graph`,
+  id: "app-graph", aud: "aud-graph", name: "graph-notes (/graph)", type: "self_hosted", domain: `${DOMAIN}/graph`,
   destinations: [{ type: "public", uri: `${DOMAIN}/graph` }, { type: "public", uri: `${DOMAIN}/graph/*` }],
-  policies: [{ id: "pol-signin", precedence: 1 }],
+  policies: [{ id: "pol-signin", precedence: 1, name: POLICY_NAME, decision: "allow", include: [{ email: { email: "owner@example.com" } }] }],
+  session_duration: "12h", app_launcher_visible: false, auto_redirect_to_identity: true, tags: ["portfolio"],
 };
+// graph-notes as it stands today: the owner approved adding the narrowing paths by hand.
+const ALLOW_APP_NARROWED = { ...ALLOW_APP, destinations: [...ALLOW_APP.destinations, ...GN_NARROWING.map((uri) => ({ type: "public", uri }))] };
+const BYPASS_POLICY = { id: "pol-public", name: PUBLIC_POLICY_NAME, reusable: true, decision: "bypass", include: [{ everyone: {} }] };
 
-function graphNotesWorld() {
+function graphNotesWorld({ narrowed = false } = {}) {
   const world = freshWorld();
   world.site.policies.push({ id: "pol-signin", name: POLICY_NAME, reusable: true, decision: "allow", include: [{ email: { email: "owner@example.com" } }] });
-  world.site.apps.push(structuredClone(ALLOW_APP));
+  world.site.apps.push(structuredClone(narrowed ? ALLOW_APP_NARROWED : ALLOW_APP));
   world.site.d1.push({ uuid: "11111111-2222-4333-8444-555555555555", name: "graph-notes" });
   world.local.github = { environment: true, secrets: ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"] };
   return world;
 }
 const gnOpts = (cloneDir, extra = {}) => ({ ...GN, cloneDir, config, ...extra });
 
-test("mixed, existing Allow app and D1: only the Bypass policy and app are new; the Allow app is left exactly as it was", async () => {
+test("mixed, existing Allow app without narrowing: exactly an add to it, then the Bypass policy and app; the PUT keeps every other setting", async () => {
   const world = graphNotesWorld();
   const cloneDir = makeClone(WRANGLER_GN_DONE);
   const h = harness(world);
   const actions = await planBootstrap(h.deps, gnOpts(cloneDir));
 
-  assert.deepEqual(creates(actions), [`bypass-policy:${PUBLIC_POLICY_NAME}`, "bypass-app:graph-notes (public)"]);
+  assert.deepEqual(creates(actions), ["app-narrowing:graph-notes (/graph)", `bypass-policy:${PUBLIC_POLICY_NAME}`, "bypass-app:graph-notes (public)"]);
+  assert.deepEqual(actions.find((a) => a.kind === "app-narrowing").uris, GN_NARROWING);
   assert.deepEqual(conflicts(actions), []);
   assert.deepEqual(actions.filter((a) => a.state === "warn"), []);
   const text = formatPlan(actions, { ...gnOpts(cloneDir), apply: false });
-  assert.match(text, /✓ Access app "graph-notes \(\/graph\)" guards example\.com\/graph \+ example\.com\/graph\/\*/);
-  assert.match(text, /· {3}example\.com\/graph\/api\/public\/\* → "graph-notes \(public\)" — Bypass, anyone/);
-  assert.match(text, /· {3}example\.com\/graph\/\* \(the rest\) → "graph-notes \(\/graph\)" — Allow, sign-in/);
+  assert.match(text, /✓ Access app "graph-notes \(\/graph\)" guards example\.com\/graph \+ example\.com\/graph\/\*\n/);
+  assert.ok(text.includes(`  + add narrowing destination(s) ${GN_NARROWING.join(" + ")} to "graph-notes (/graph)" — the paths under each exact public path ask for sign-in\n`), text);
+  assert.ok(text.includes([
+    `  ·   example.com/graph/api/public/* → "graph-notes (public)" — Bypass, anyone`,
+    `  ·   example.com/graph → "graph-notes (/graph)" — Allow, sign-in`,
+    `  ·   example.com/graph/public/* (narrowing) → "graph-notes (/graph)" — Allow, sign-in`,
+    `  ·   example.com/graph/public.txt/* (narrowing) → "graph-notes (/graph)" — Allow, sign-in`,
+    `  ·   example.com/graph/manifest.webmanifest/* (narrowing) → "graph-notes (/graph)" — Allow, sign-in`,
+    `  ·   example.com/graph/* (the rest) → "graph-notes (/graph)" — Allow, sign-in`,
+  ].join("\n")), text);
   assert.match(text, /\nD1\n {2}✓ wrangler\.jsonc already carries the database_id for graph-notes\n/);
   assert.match(text, /\nGitHub owner\/graph-notes\n {2}✓ environment production exists\n {2}✓ secret CLOUDFLARE_API_TOKEN is set\n {2}✓ secret CLOUDFLARE_ACCOUNT_ID is set\n/);
-  assert.match(text, /2 change\(s\) planned$/);
+  assert.match(text, /3 change\(s\) planned$/);
+  assert.deepEqual(writes(h.http.calls), [], "no Cloudflare write in plan mode");
 
   const planCalls = h.http.calls.length;
   await applyBootstrap(h.deps, actions, gnOpts(cloneDir));
-  assert.deepEqual(api(writes(h.http.calls.slice(planCalls))), ["POST /access/policies", "POST /access/apps"], "no D1 write");
-  assert.deepEqual(world.site.apps[0], ALLOW_APP, "the Allow app is untouched");
+  const sent = writes(h.http.calls.slice(planCalls));
+  assert.deepEqual(api(sent), ["PUT /access/apps/app-graph", "POST /access/policies", "POST /access/apps"],
+    "the narrowing comes first, so no child is ever public; no D1 write");
+  const expected = { ...ALLOW_APP_NARROWED, policies: [{ id: "pol-signin", precedence: 1 }] };
+  assert.deepEqual(sent[0].body, expected, "the full current settings, with only the narrowing destinations added");
+  assert.deepEqual(world.site.apps[0], expected);
   assert.deepEqual(world.site.apps[1].destinations.map((d) => d.uri), GN_PUBLIC);
   assert.equal(world.site.apps[1].name, "graph-notes (public)");
   assert.deepEqual(h.proc.calls.filter((c) => c.cmd === "gh" && (c.args.includes("-X") || c.args[1] === "set")), [], "no GitHub write");
   assert.equal(readFileSync(join(cloneDir, "backend", "wrangler.jsonc"), "utf8"), WRANGLER_GN_DONE);
-  assert.match(h.logs.join("\n"), /✓ \/graph redirects to test-team\.cloudflareaccess\.com, and its 6 public path\(s\) answer signed out/);
+  assert.equal(h.logs[0], `  + added narrowing destination(s) ${GN_NARROWING.join(" + ")} to Access app "graph-notes (/graph)"`);
+  assert.match(h.logs.join("\n"), /✓ \/graph redirects to test-team\.cloudflareaccess\.com, and its 6 public path\(s\) answer signed out/,
+    "the child probes pass once the narrowing destinations are in");
 
   const replan = await planBootstrap(harness(world).deps, gnOpts(cloneDir));
   assert.deepEqual(creates(replan), []);
   assert.equal(replan.find((a) => a.kind === "bypass-app").state, "ok");
 });
 
-test("mixed reuses an existing Bypass app holding exactly the public paths, with policies by id or inline", async () => {
+test("mixed, graph-notes as it stands today (narrowing paths and public app in place) plans zero changes, with policies by id or inline", async () => {
   for (const inline of [false, true]) {
-    const world = graphNotesWorld();
-    const bypass = { id: "pol-public", name: PUBLIC_POLICY_NAME, reusable: true, decision: "bypass", include: [{ everyone: {} }] };
-    if (!inline) world.site.policies.push(bypass);
+    const world = graphNotesWorld({ narrowed: true });
+    if (!inline) world.site.policies.push(BYPASS_POLICY);
     world.site.apps.push({ id: "app-pub", name: "graph-notes (public)", destinations: GN_PUBLIC.map((uri) => ({ type: "public", uri })),
-      policies: [inline ? { ...bypass, precedence: 1 } : { id: bypass.id, precedence: 1 }] });
+      policies: [inline ? { ...BYPASS_POLICY, precedence: 1 } : { id: BYPASS_POLICY.id, precedence: 1 }] });
     const h = harness(world);
-    const actions = await planBootstrap(h.deps, gnOpts(makeClone(WRANGLER_GN_DONE)));
+    const opts = gnOpts(makeClone(WRANGLER_GN_DONE));
+    const actions = await planBootstrap(h.deps, opts);
     assert.deepEqual(creates(actions), [], `inline=${inline}`);
     assert.deepEqual(conflicts(actions), [], `inline=${inline}`);
+    assert.ok(!actions.some((a) => a.kind === "app-narrowing"), "nothing to add to the Allow app");
+    assert.match(actions.find((a) => a.kind === "app").summary, new RegExp(`guards .*${GN_NARROWING.map((u) => u.replaceAll(".", "\\.").replaceAll("*", "\\*")).join(" \\+ ")}$`));
     assert.match(actions.find((a) => a.kind === "bypass-app").summary, /^Bypass app "graph-notes \(public\)" lets anyone reach /);
     assert.ok(!actions.some((a) => a.kind === "bypass-policy"), "no policy step when the app already exists");
-    assert.equal(actions.find((a) => a.kind === "check").state, "ok");
+    assert.equal(actions.find((a) => a.kind === "check").state, "ok", "every child probe already asks for sign-in");
+    assert.match(formatPlan(actions, { ...opts, apply: false }), /nothing to create — already bootstrapped$/);
+    assert.deepEqual(writes(h.http.calls), []);
   }
 });
 
 test("mixed conflicts: the plan names each one, apply refuses, and nothing is written", async () => {
-  const bypassPolicy = { id: "pol-public", name: PUBLIC_POLICY_NAME, reusable: true, decision: "bypass", include: [{ everyone: {} }] };
   const bypassApp = (name, uris) => ({ id: `app-${name}`, name, destinations: uris.map((uri) => ({ uri })), policies: [{ id: "pol-public" }] });
   const cases = [
     ["an extra destination in the public app",
@@ -232,17 +258,17 @@ test("mixed conflicts: the plan names each one, apply refuses, and nothing is wr
       /Bypass app "open graph" lets anyone reach/],
     ["a public path already guarded by another app",
       (w) => w.site.apps.push({ id: "app-old", name: "notes viewer", destinations: [{ uri: `${DOMAIN}/graph/public` }], policies: [{ id: "pol-signin" }] }),
-      /example\.com\/graph\/public already belong\(s\) to Access app "notes viewer" .*never edits, narrows or moves one/],
+      /example\.com\/graph\/public already belong\(s\) to Access app "notes viewer" .*never removes, alters or moves one/],
     ["exactly the public paths, but on an Allow app",
       (w) => w.site.apps.push({ id: "app-y", name: "notes viewer", destinations: GN_PUBLIC.map((uri) => ({ uri })), policies: [{ id: "pol-signin" }] }),
       /Access app "notes viewer" holds exactly the public paths but is not Bypass for Everyone/],
     [`a "${PUBLIC_POLICY_NAME}" policy that is not Bypass for Everyone`,
-      (w) => w.site.policies.push({ ...bypassPolicy, include: [{ email: { email: "owner@example.com" } }] }),
+      (w) => w.site.policies.push({ ...BYPASS_POLICY, include: [{ email: { email: "owner@example.com" } }] }),
       /reusable policy "portfolio-app public" exists but is not Bypass for Everyone — left unchanged/],
   ];
   for (const [name, setup, summary] of cases) {
-    const world = graphNotesWorld();
-    if (!name.startsWith(`a "${PUBLIC_POLICY_NAME}"`)) world.site.policies.push(bypassPolicy);
+    const world = graphNotesWorld({ narrowed: true });
+    if (!name.startsWith(`a "${PUBLIC_POLICY_NAME}"`)) world.site.policies.push(BYPASS_POLICY);
     setup(world);
     const before = structuredClone(world.site.apps);
     const h = harness(world);
@@ -255,6 +281,88 @@ test("mixed conflicts: the plan names each one, apply refuses, and nothing is wr
     assert.deepEqual(writes(h.http.calls), [], name);
     assert.deepEqual(world.site.apps, before, `${name}: no app changed`);
   }
+});
+
+test("mixed refuses to add narrowing destinations to an Allow app it cannot change unambiguously, and writes nothing", async () => {
+  const cases = [
+    ["an unexpected destination in the Allow app",
+      (app) => app.destinations.push({ type: "public", uri: `${DOMAIN}/graph/admin/*` }),
+      /Access app "graph-notes \(\/graph\)" guards \[.*example\.com\/graph\/admin\/\*\], which overlaps .* without matching it/],
+    ["a narrowing path for a public path no longer listed",
+      (app) => app.destinations.push({ type: "public", uri: `${DOMAIN}/graph/old.txt/*` }),
+      /Access app "graph-notes \(\/graph\)" guards \[.*example\.com\/graph\/old\.txt\/\*\], which overlaps/],
+    ["paths in the deprecated self_hosted_domains only",
+      (app) => { app.self_hosted_domains = app.destinations.map((d) => d.uri); delete app.destinations; },
+      /needs narrowing destination\(s\) .*, but its paths are in the deprecated self_hosted_domains, not destinations; add them by hand/],
+    ["a destination that is not a public hostname",
+      (app) => app.destinations.push({ type: "private", cidr: "10.0.0.0/8" }),
+      /but it holds a destination that is not a public hostname; add them by hand/],
+    ["a Bypass policy on the Allow app",
+      (app) => app.policies.push({ id: "pol-public", precedence: 2, decision: "bypass", include: [{ everyone: {} }] }),
+      /but it has a Bypass policy, so a destination added to it would not ask for sign-in; add them by hand/],
+    ["an app that is not self-hosted",
+      (app) => { app.type = "saas"; },
+      /but it is a saas app, not self-hosted; add them by hand/],
+  ];
+  for (const [name, change, summary] of cases) {
+    const world = graphNotesWorld();
+    change(world.site.apps[0]);
+    const before = structuredClone(world.site.apps);
+    const h = harness(world);
+    const opts = gnOpts(makeClone(WRANGLER_GN_DONE));
+    const actions = await planBootstrap(h.deps, opts);
+    assert.ok(conflicts(actions).some((a) => summary.test(a.summary)), `${name}: ${conflicts(actions).map((a) => a.summary).join(" | ")}`);
+    assert.ok(!creates(actions).some((c) => c.startsWith("app")), name);
+    await assert.rejects(applyBootstrap(h.deps, actions, opts), /refusing to apply/, name);
+    assert.deepEqual(writes(h.http.calls), [], name);
+    assert.deepEqual(world.site.apps, before, `${name}: no app changed`);
+  }
+});
+
+test("mixed apply refuses to PUT an Allow app whose paths changed after the plan", async () => {
+  const world = graphNotesWorld();
+  const h = harness(world);
+  const opts = gnOpts(makeClone(WRANGLER_GN_DONE));
+  const actions = await planBootstrap(h.deps, opts);
+  world.site.apps[0].destinations.push({ type: "public", uri: `${DOMAIN}/graph/admin/*` });
+  const before = structuredClone(world.site.apps);
+  const planCalls = h.http.calls.length;
+  await assert.rejects(applyBootstrap(h.deps, actions, opts), /Access app "graph-notes \(\/graph\)" now guards \[.*graph\/admin\/\*\], not .* as planned; re-run the plan/);
+  assert.deepEqual(writes(h.http.calls.slice(planCalls)), []);
+  assert.deepEqual(world.site.apps, before);
+});
+
+test("mixed, fresh graph-notes: the Allow app is created with a narrowing destination per exact public path, and apply's child probes pass", async () => {
+  const world = freshWorld();
+  const cloneDir = makeClone();
+  const h = harness(world);
+  const opts = gnOpts(cloneDir);
+  const actions = await planBootstrap(h.deps, opts);
+  const allow = actions.find((a) => a.kind === "app");
+  assert.equal(allow.state, "create");
+  assert.deepEqual(allow.uris, [`${DOMAIN}/graph`, `${DOMAIN}/graph/*`, ...GN_NARROWING]);
+  assert.match(allow.summary, new RegExp(`destinations example\\.com/graph \\+ example\\.com/graph/\\* \\+ example\\.com/graph/public/\\* \\+ `));
+  assert.ok(!actions.some((a) => a.kind === "app-narrowing"), "a new app gets them at creation, not as a later add");
+
+  await applyBootstrap(h.deps, actions, opts);
+  assert.deepEqual(world.site.apps[0].destinations.map((d) => d.uri), [`${DOMAIN}/graph`, `${DOMAIN}/graph/*`, ...GN_NARROWING]);
+  assert.match(h.logs.join("\n"), /✓ \/graph redirects to test-team\.cloudflareaccess\.com, and its 6 public path\(s\) answer signed out/);
+  const probed = h.http.calls.filter((c) => c.url.includes("/graph/public/portfolio-app-verify"));
+  assert.ok(probed.length > 0, "the child probe still runs");
+  assert.equal(world.site.d1.length, 1);
+
+  const replan = await planBootstrap(harness(world).deps, opts);
+  assert.deepEqual(creates(replan).filter((c) => !c.startsWith("d1-config")), [], "a re-run plans nothing in Access");
+});
+
+test("mixed narrowing skips the bare prefix and any path whose children a listed wildcard makes public", async () => {
+  const world = freshWorld();
+  const opts = { repo: "owner/graph-notes", prefix: "/graph", cloneDir: makeClone(), config,
+    publicPaths: ["/graph", "/graph/docs/*", "/graph/docs/readme", "/graph/about", "/graph/about/*", "/graph/terms"] };
+  const actions = await planBootstrap(harness(world).deps, opts);
+  assert.deepEqual(actions.find((a) => a.kind === "app").uris, [`${DOMAIN}/graph/*`, `${DOMAIN}/graph/terms/*`],
+    "only /graph/terms needs one: /graph is the prefix, /graph/docs/readme sits under /graph/docs/*, and /graph/about/* is listed");
+  assert.deepEqual(conflicts(actions), []);
 });
 
 test("mixed refuses to move a destination out of an existing private app (time-track already fully private)", async () => {
@@ -270,8 +378,8 @@ test("mixed refuses to move a destination out of an existing private app (time-t
 });
 
 test("mixed leaves a Bypass app above the prefix alone, as information", async () => {
-  const world = graphNotesWorld();
-  world.site.policies.push({ id: "pol-public", name: PUBLIC_POLICY_NAME, reusable: true, decision: "bypass", include: [{ everyone: {} }] });
+  const world = graphNotesWorld({ narrowed: true });
+  world.site.policies.push(BYPASS_POLICY);
   world.site.apps.push({ id: "app-home", name: "home", destinations: [{ uri: DOMAIN }], policies: [{ id: "pol-public" }] });
   const actions = await planBootstrap(harness(world).deps, gnOpts(makeClone(WRANGLER_GN_DONE)));
   assert.deepEqual(conflicts(actions), []);
@@ -312,19 +420,20 @@ test("mixed apply stops before D1 and GitHub when a public path still asks for s
   }
 });
 
-test("mixed apply stops before D1 and GitHub when the children of an exact public path inherit its Bypass", async () => {
+test("mixed apply still stops before D1 and GitHub when a child of an exact public path answers signed out despite the narrowing", async () => {
   const world = freshWorld();
-  world.site.inheritExact = true;
   const cloneDir = makeClone();
   const h = harness(world);
   const opts = gnOpts(cloneDir);
   const actions = await planBootstrap(h.deps, opts);
-  await assert.rejects(applyBootstrap(h.deps, actions, opts), (err) => {
+  const children = ["/graph/public/portfolio-app-verify", "/graph/public.txt/portfolio-app-verify", "/graph/manifest.webmanifest/portfolio-app-verify"];
+  const narrowingIgnored = async (url, init) => (children.includes(new URL(url).pathname) ? { status: 200, headers: new Map() } : h.http.fetch(url, init));
+  await assert.rejects(applyBootstrap({ ...h.deps, fetch: narrowingIgnored }, actions, opts), (err) => {
     assert.match(err.message, /^Access is not answering for \/graph: /);
-    for (const child of ["/graph/public/portfolio-app-verify", "/graph/public.txt/portfolio-app-verify", "/graph/manifest.webmanifest/portfolio-app-verify"]) {
+    for (const child of children) {
       assert.ok(err.message.includes(`https://${DOMAIN}${child} answered 200 — not behind Access`), `${child}: ${err.message}`);
     }
-    assert.doesNotMatch(err.message, /public path still asks for sign-in|graph\/api\/portfolio-app-verify/, "only the inherited children fail");
+    assert.doesNotMatch(err.message, /public path still asks for sign-in|graph\/api\/portfolio-app-verify/, "only the children fail");
     return true;
   });
   assert.deepEqual(world.site.apps.map((a) => a.name), ["graph-notes (/graph)", "graph-notes (public)"]);
@@ -334,20 +443,22 @@ test("mixed apply stops before D1 and GitHub when the children of an exact publi
 });
 
 test("mixed apply stops when the Bypass app goes live after a round's private probes were answered", async () => {
-  const world = graphNotesWorld();
-  world.site.inheritExact = true;
+  const world = graphNotesWorld({ narrowed: true });
   const h = harness(world);
   const opts = gnOpts(makeClone(WRANGLER_GN_DONE));
   const actions = await planBootstrap(h.deps, opts);
   const planCalls = h.http.calls.length;
   let bypassLive = false;
   const probed = [];
+  // Once the Bypass app is live, a child of /graph/public answers signed out: it went
+  // public with the Bypass app, after the round had already asked it.
   const propagating = async (url, init) => {
     const u = new URL(url);
     if (u.hostname === "api.cloudflare.com") return h.http.fetch(url, init);
     probed.push(u.pathname);
     if (u.pathname === "/graph/public") bypassLive = true;
-    return bypassLive ? h.http.fetch(url, init) : { status: 302, headers: new Map([["location", ACCESS_LOGIN]]) };
+    if (!bypassLive) return { status: 302, headers: new Map([["location", ACCESS_LOGIN]]) };
+    return u.pathname === "/graph/public/portfolio-app-verify" ? { status: 200, headers: new Map() } : h.http.fetch(url, init);
   };
   let sleeps = 0;
   await assert.rejects(applyBootstrap({ ...h.deps, fetch: propagating, sleep: async () => { sleeps += 1; } }, actions, opts), (err) => {
@@ -362,11 +473,11 @@ test("mixed apply stops when the Bypass app goes live after a round's private pr
     "asked again in the second round, then once in each remaining attempt");
   assert.ok(!h.logs.some((l) => l.includes("answer signed out")), "no success line");
   assert.deepEqual(api(writes(h.http.calls.slice(planCalls))), ["POST /access/policies", "POST /access/apps"]);
-  assert.deepEqual(world.site.apps[0], ALLOW_APP, "the Allow app is untouched");
+  assert.deepEqual(world.site.apps[0], ALLOW_APP_NARROWED, "the Allow app is untouched");
 });
 
 test("mixed apply keeps polling when the second round fails for a passing reason, and goes on once two rounds in a row pass", async () => {
-  const world = graphNotesWorld();
+  const world = graphNotesWorld({ narrowed: true });
   const h = harness(world);
   const opts = gnOpts(makeClone(WRANGLER_GN_DONE));
   const actions = await planBootstrap(h.deps, opts);
@@ -382,15 +493,34 @@ test("mixed apply keeps polling when the second round fails for a passing reason
   assert.match(h.logs.join("\n"), /✓ \/graph redirects to test-team\.cloudflareaccess\.com, and its 6 public path\(s\) answer signed out/);
 });
 
-test("mixed apply passes under inheritance when the only exact public path is the prefix, whose children the Allow app's /* answers", async () => {
+test("mixed apply passes when the only exact public path is the prefix, whose children the Allow app's /* answers, with no narrowing destination", async () => {
   const world = timeTrackWorld();
-  world.site.inheritExact = true;
   const cloneDir = makeClone(WRANGLER_TT);
   const h = harness(world);
   const actions = await planBootstrap(h.deps, ttOpts(cloneDir));
+  assert.ok(!actions.some((a) => a.kind === "app-narrowing"));
   await applyBootstrap(h.deps, actions, ttOpts(cloneDir));
+  assert.deepEqual(world.site.apps[0].destinations.map((d) => d.uri), [`${DOMAIN}/time-track/*`]);
   assert.match(h.logs.join("\n"), /✓ \/time-track redirects to test-team\.cloudflareaccess\.com, and its 2 public path\(s\) answer signed out/);
   assert.equal(world.site.d1.length, 1);
+});
+
+test("mixed, time-track as it stands today plans zero changes", async () => {
+  const world = timeTrackWorld();
+  world.site.policies.push({ id: "pol-signin", name: POLICY_NAME, reusable: true, decision: "allow", include: [{ email: { email: "owner@example.com" } }] }, BYPASS_POLICY);
+  world.site.apps.push(
+    { id: "app-tt", name: "time-track (/time-track)", type: "self_hosted", destinations: [{ type: "public", uri: `${DOMAIN}/time-track/*` }], policies: [{ id: "pol-signin", precedence: 1 }] },
+    { id: "app-tt-pub", name: "time-track (public)", type: "self_hosted", destinations: TT.publicPaths.map((p) => ({ type: "public", uri: `${DOMAIN}${p}` })), policies: [{ id: "pol-public", precedence: 1 }] },
+  );
+  world.site.d1.push({ uuid: "22222222-2222-4333-8444-555555555555", name: "time-track" });
+  world.local.github = { environment: true, secrets: ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"] };
+  const cloneDir = makeClone(WRANGLER_TT.replace(`"database_id": "REPLACE_AFTER_d1_create"`, `"database_id": "22222222-2222-4333-8444-555555555555"`));
+  const h = harness(world);
+  const actions = await planBootstrap(h.deps, ttOpts(cloneDir));
+  assert.deepEqual(creates(actions), []);
+  assert.deepEqual(conflicts(actions), []);
+  assert.match(formatPlan(actions, { ...ttOpts(cloneDir), apply: false }), /nothing to create — already bootstrapped$/);
+  assert.deepEqual(writes(h.http.calls), []);
 });
 
 // --- CLI ---------------------------------------------------------------------------
@@ -486,8 +616,14 @@ test("cli verify --public-path checks both ways; without it verify is unchanged"
   assert.match(before.out, /NOT set up as a mixed app \(sign-in except \/graph\/public, .*\) — refusing/);
   assert.match(before.out, /✗ https:\/\/example\.com\/graph\/public .*public path still asks for sign-in/);
 
-  world.site.policies.push({ id: "pol-public", name: PUBLIC_POLICY_NAME, reusable: true, decision: "bypass", include: [{ everyone: {} }] });
+  world.site.policies.push(BYPASS_POLICY);
   world.site.apps.push({ id: "app-pub", name: "graph-notes (public)", destinations: GN_PUBLIC.map((uri) => ({ uri })), policies: [{ id: "pol-public" }] });
+  const inherited = await cli(world, args);
+  assert.equal(inherited.code, 1, "without narrowing, a child of an exact public path inherits its Bypass");
+  assert.match(inherited.out, /✗ https:\/\/example\.com\/graph\/public\/portfolio-app-verify answered 200 — not behind Access/);
+  assert.match(inherited.out, /NOT set up as a mixed app/);
+
+  world.site.apps[0] = structuredClone(ALLOW_APP_NARROWED);
   const after = await cli(world, args);
   assert.equal(after.code, 0, after.out);
   assert.deepEqual(after.http.calls.map((c) => new URL(c.url).pathname), [
@@ -498,12 +634,6 @@ test("cli verify --public-path checks both ways; without it verify is unchanged"
   ]);
   assert.match(after.out, /example\.com\/graph is behind Cloudflare Access, and its 6 public path\(s\) answer signed out$/);
   assert.deepEqual(after.proc.calls, [], "still no keychain, git or gh");
-
-  world.site.inheritExact = true;
-  const inherited = await cli(world, args);
-  assert.equal(inherited.code, 1, "a child of an exact public path answers signed out");
-  assert.match(inherited.out, /✗ https:\/\/example\.com\/graph\/public\/portfolio-app-verify answered 200 — not behind Access/);
-  assert.match(inherited.out, /NOT set up as a mixed app/);
 
   const plain = await cli(world, ["verify", "--path", "/graph", "--domain", DOMAIN, "--team", TEAM]);
   assert.equal(plain.code, 0);

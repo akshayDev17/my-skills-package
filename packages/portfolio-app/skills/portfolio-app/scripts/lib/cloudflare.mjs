@@ -14,6 +14,7 @@
 //                      links reusable policies, and reusable + inline are mutually exclusive.
 //                      GET/PUT /accounts/{id}/access/apps/{app_id} reads one app and
 //                      replaces it: PUT takes the app's full settings, not a patch.
+//                      DELETE on the same path deletes the app.
 //   D1                 GET/POST /accounts/{id}/d1/database
 //   R2                 GET /accounts/{id}/r2/buckets/{name}, POST /accounts/{id}/r2/buckets
 //   zones              GET /zones?name=<domain>
@@ -121,16 +122,28 @@ export async function updateAccessApp(cf, appId, app) {
   return (await cfRequest(cf, "PUT", `/accounts/${cf.accountId}/access/apps/${encodeURIComponent(appId)}`, app)).result;
 }
 
+export async function deleteAccessApp(cf, appId) {
+  return (await cfRequest(cf, "DELETE", `/accounts/${cf.accountId}/access/apps/${encodeURIComponent(appId)}`)).result;
+}
+
+/** A PUT body: `app`'s full settings with `destinations` in place, policies as `{ id, precedence }` links. */
+const withDestinations = (app, destinations) => ({
+  ...app,
+  destinations,
+  policies: (app.policies ?? []).map((p, i) => ({ id: p.id, precedence: p.precedence ?? i + 1 })),
+});
+
 /**
  * `app`'s full settings with `uris` appended to its destinations, every other field as it
  * was. Its policies are sent as `{ id, precedence }` links, keeping each id and precedence.
  */
 export function withAddedDestinations(app, uris) {
-  return {
-    ...app,
-    destinations: [...app.destinations, ...uris.map((uri) => ({ type: "public", uri }))],
-    policies: (app.policies ?? []).map((p, i) => ({ id: p.id, precedence: p.precedence ?? i + 1 })),
-  };
+  return withDestinations(app, [...app.destinations, ...uris.map((uri) => ({ type: "public", uri }))]);
+}
+
+/** The opposite of `withAddedDestinations`: `app` with exactly the destinations `uris` taken out. */
+export function withoutDestinations(app, uris) {
+  return withDestinations(app, app.destinations.filter((d) => !uris.includes(d.uri)));
 }
 
 export async function findD1(cf, name) {

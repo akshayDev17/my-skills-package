@@ -67,6 +67,7 @@ command line, one `--public-path` per path. Nothing is inferred: a path is publi
 is listed. Each path is one of:
 
 - `/<prefix>` itself;
+- `/<prefix>/`, the prefix's trailing-slash path, exactly (see below);
 - an exact path under it, such as `/graph/public.txt`;
 - a directory under it with a final `/*`, such as `/graph/_next/*`.
 
@@ -84,7 +85,20 @@ public too, list `<path>/*` as well.
 
 The leading `/` is optional. Refused before anything is read: a path outside the prefix,
 `/<prefix>/*` (the whole app; that is `--public`), a `*` anywhere but a final `/*`, empty, `.` or
-`..` segments, queries, and `--public` together with `--public-path`.
+`..` segments (the one exception is `/<prefix>/` itself: `/<prefix>//`, `/<prefix>/x/` and
+`/<prefix>//x` are refused), queries, and `--public` together with `--public-path`.
+
+**The trailing-slash path `/<prefix>/`.** `/time-track` and `/time-track/` are two request paths,
+and Access tells them apart: with `time-track` public and `time-track/*` behind sign-in, the first
+answers signed out and the second asks for sign-in (seen on the live account). Listing
+`/<prefix>/` makes exactly `<domain>/<prefix>/` a public destination. It gets no narrowing
+destination: that would be `<prefix>/*`, which the Allow app already holds. But it is the parent
+of every page under the prefix, and an Access destination covers its subpaths too; the docs do
+not say whether `<prefix>/` or the Allow app's `<prefix>/*` is the more specific for
+`<prefix>/<child>` (see the research notes). So the plan says the children are meant for the
+Allow app and that a child is checked, and `--apply` probes `<prefix>/portfolio-app-verify` and
+`<prefix>/api/portfolio-app-verify`, which must still redirect to the login. If they answer signed
+out, apply removes `<prefix>/` again (below).
 
 ```sh
 # time-track: everything signed in except the landing page and its static assets
@@ -125,6 +139,32 @@ time-track's only exact public path is the bare prefix, so it has no narrowing d
 nothing to create — already bootstrapped
 ```
 
+Signed out, `/time-track/` (with the slash) still asks for sign-in, because only the exact
+`time-track` is public. The owner's fix is the same command with that path listed too:
+
+```sh
+portfolio-app bootstrap --repo owner/time-track --path /time-track \
+  --public-path /time-track --public-path '/time-track/_next/*' --public-path /time-track/ \
+  --clone ../time-track
+```
+
+It plans one change, to the public app only:
+
+```
+  ✓ Bypass app "time-track (public)" lets anyone reach example.com/time-track + example.com/time-track/_next/*
+  + add public destination(s) example.com/time-track/ to Bypass app "time-track (public)" (anyone, no sign-in)
+  · who answers (…):
+  ·   example.com/time-track → "time-track (public)" — Bypass, anyone
+  ·   example.com/time-track/_next/* → "time-track (public)" — Bypass, anyone
+  ·   example.com/time-track/ → "time-track (public)" — Bypass, anyone
+  ·   example.com/time-track/* (the rest) → "time-track (/time-track)" — Allow, sign-in
+  ·   example.com/time-track/<child> → "time-track (/time-track)" (by example.com/time-track/*) — Allow, sign-in; example.com/time-track/ covers its subpaths too and the docs do not rank it against example.com/time-track/*, so apply checks a child and removes what it made public if one answers signed out
+…
+1 change(s) planned
+```
+
+`verify` for time-track then takes the same three `--public-path` flags.
+
 The Cloudflare Access step, in apply order:
 
 1. **The Allow app**, as for a private app, on `<domain>/<prefix>` and `<domain>/<prefix>/*`,
@@ -144,22 +184,43 @@ The Cloudflare Access step, in apply order:
 3. **The Bypass app** `<repo name> (public)` (graph-notes gets `graph-notes (public)`), whose
    destinations are exactly the listed paths, attached to that policy. An existing app holding
    exactly those destinations, all of whose policies are Bypass for Everyone, is reused under
-   whatever name it has.
+   whatever name it has. An existing `<repo name> (public)` that holds only some of the listed
+   paths and nothing else, is Bypass for Everyone and can take a plain `PUT` (self-hosted, its
+   paths in `destinations`, all public hostnames) gets the missing ones added, the same way as
+   the narrowing destinations: the plan shows `+ add public destination(s) … to Bypass app
+   "<app>"`, and apply reads the app again, refuses if it changed since the plan, and sends it
+   back with only those destinations added. So a re-run with one more `--public-path` adds only
+   that destination.
 4. **Wait for both answers.** With `--apply`, it waits until every private probe redirects to
    the Access login and every public path answers signed out (see `verify` below), and stops
    before D1 or GitHub if that never happens. The private probes include a child of each public
    path listed without a `/*`, so a run whose exact public paths open their children despite
-   the narrowing destinations stops here, with both Access apps already in place; nothing is
-   removed for you.
+   the narrowing destinations stops here.
    The two apps start answering at different moments, so the first round in which every probe
    passes may hold private answers taken before the Bypass app was live. That round is run
    again at once, and apply goes on only when the second run passes too. If the second run
    fails, the wait carries on like after any failed round, until a round and its second run
    both pass or the attempts run out.
+5. **Roll back what this run made public, if the wait fails.** This applies to every mixed
+   run that added public destinations: a new Bypass app, or new destinations on an existing
+   one. When the wait fails, apply removes exactly the destinations this run added from the
+   existing Bypass app (reading it again and sending it back with only those taken out), and
+   deletes a Bypass app this run created. Then it runs the wait again with the public paths
+   that were there before the run, and reports both: the original failure, each rollback step,
+   and whether the site now answers as before. It exits 1 either way, and D1 and GitHub are not
+   touched. It never removes anything that existed before the run. A Bypass app it created
+   that holds something else by then is left in place and reported for a hand fix. The Allow
+   app's changes and the `portfolio-app public` policy stay, since neither makes anything
+   public.
+   Before it adds the first public destination, apply records which private probes ask for
+   sign-in. If one of those answers signed out during the wait, the run has made it public, so
+   the wait stops at once and the rollback starts, instead of leaving it public until the
+   attempts run out.
 
 D1 and GitHub follow as for a private app. Each step only fills in what is missing, so a mixed
 run on an app that already has its Allow app, D1 and secrets adds only the narrowing
-destinations it lacks, and the Bypass policy and app.
+destinations it lacks, and the Bypass policy and app (or the public destinations its Bypass app
+lacks).
 
 **Which app answers which path.** When several Access apps match a request, the one with the
 most specific matching destination applies, and within one app Bypass policies are evaluated
@@ -167,8 +228,11 @@ before Allow. A listed destination under the prefix is more specific than the Al
 `<prefix>/*`, so the Bypass app wins there; a public `/<prefix>` is left out of the Allow app, so
 only the Bypass app holds it. The paths under an exact public path would inherit its Bypass, so
 its narrowing destination, more specific again, sends them to the Allow app. Everything else
-under the prefix goes to the Allow app's `<prefix>/*`. A child of each exact public path is still
-probed and must ask for sign-in. The plan prints the intended answer per destination:
+under the prefix goes to the Allow app's `<prefix>/*`. A public `<prefix>/` is the exception: the
+paths under it are meant for `<prefix>/*` too, but which of the two wins there is not documented,
+and no narrowing destination can decide it, so the plan adds a line saying so. A child of each
+exact public path is still probed and must ask for sign-in. The plan prints the intended answer
+per destination:
 
 ```
   · who answers (the app with the most specific matching destination wins; Bypass lets anyone in, Allow asks for sign-in):
@@ -213,7 +277,8 @@ ok, `1` a step failed, `2` usage error or a conflict in the plan.
     an Access login;
   - with `--public-path`: an app other than the public app that already holds a listed path (a
     destination is never moved from one app to another); an app named `<repo name> (public)`
-    that holds anything but exactly the listed paths; an app holding exactly the listed paths
+    that holds anything beyond the listed paths, or only some of them but is not Bypass for
+    Everyone or cannot take a plain `PUT`; an app holding exactly the listed paths
     that is not Bypass for Everyone; a Bypass app that opens more of the prefix than the list
     (say `<domain>/graph/api/*` when only `/graph/api/public/*` is listed); and a
     `portfolio-app public` policy that is not Bypass for Everyone;
@@ -274,8 +339,11 @@ For graph-notes' six paths that is `/graph`, `/graph/portfolio-app-verify`,
 `/graph/public.txt/portfolio-app-verify` and `/graph/manifest.webmanifest/portfolio-app-verify`
 as private, then the six public probes. The three children pass only because the Allow app holds
 their narrowing destinations. For time-track, the child of the public `/time-track` is
-`/time-track/portfolio-app-verify`, which is already a private probe. Without `--public-path`,
-`verify` behaves exactly as before.
+`/time-track/portfolio-app-verify`, which is already a private probe, and so is the child of
+`/time-track/`. With `/time-track/` listed, time-track's probes are
+`/time-track/portfolio-app-verify` and `/time-track/api/portfolio-app-verify` as private, then
+`/time-track`, `/time-track/_next/portfolio-app-verify` and `/time-track/` as public. Without
+`--public-path`, `verify` behaves exactly as before.
 
 **Limit:** a public path that answers a bare `401` or `403` fails the check. Access can answer
 that way, and so can Cloudflare's bot protection when it refuses an automated client; from a
@@ -413,6 +481,54 @@ security add-generic-password -s portfolio-app -a cloudflare-deploy-token -w
   - [Access policies, order of execution](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/)
   - [application paths](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/)
   - [update app](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/applications/methods/update/)
+
+### The trailing-slash path `<prefix>/` (read 2026-11-15)
+
+- **A trailing-slash destination is a path like any other.** The API's public destination is
+  `{ "type": "public", "uri" }`, where `uri` is "The public hostname and optional path to
+  secure." The application-paths page lists what Access paths do not support, under
+  "Unsupported URLs": port numbers, query strings ("Query strings (such as `?foo=bar`) are not
+  supported in Access application paths") and anchor links. A trailing `/` is not among them,
+  and the only wildcard limits are "At most one wildcard in between each slash in the **Path**".
+  Neither page mentions a trailing slash anywhere, so the docs neither forbid `<domain>/<prefix>/`
+  nor describe it. The tool maps `/<prefix>/` to exactly that destination.
+- **Access does not fold `/x/` into `/x`.** Cloudflare's Gateway docs say "Gateway ignores trailing
+  forward slashes (`/`) in URLs", but that is Gateway's URL lists, not Access. On the live account
+  (2026-11-15), with the Bypass app holding exactly `time-track` and the Allow app `time-track/*`,
+  `/time-track` answered 200 signed out and `/time-track/` redirected to the Access login. If
+  Access ignored the slash, both would have answered the same way. The answer shows that
+  `time-track/*` covers `/time-track/` and beats the `time-track` that `/time-track/` would
+  otherwise inherit.
+- **A destination covers its subpaths.** The API's destination override field says "Unlike the
+  `uri` in public destinations, override path patterns do not implicitly cover subpaths; to do
+  that, use a wildcard", so a public destination's `uri` does implicitly cover them. This matches
+  the application-paths page ("If no separate, specific rule is set for `dashboard.com/eng/exec`,
+  it will inherit any rules set for `dashboard.com/eng`") and the live inheritance noted above.
+  So `<prefix>/` in the Bypass app also applies to `<prefix>/<child>`.
+- **Not answered by the docs:** whether `<prefix>/` or the Allow app's `<prefix>/*` is "the more
+  specific rule" for `<prefix>/<child>`. The page ranks only a parent against a deeper child
+  (`dashboard.com/eng` against `dashboard.com/eng/exec`), and nowhere ranks an exact destination
+  against a wildcard one at the same depth. `<prefix>/*` is one character longer, which is how it
+  beat the exact `time-track` for `/time-track/`, but the docs never say that length decides. A
+  narrowing destination cannot settle it, since `<prefix>/`'s would be `<prefix>/*` itself. So
+  the tool relies on its probes. `<prefix>/portfolio-app-verify` and
+  `<prefix>/api/portfolio-app-verify` must still redirect after `<prefix>/` is added. If they
+  answer signed out, the run removes `<prefix>/` again at once (step 5 of the mixed app's
+  Access step) and exits 1.
+- **Also documented, not used:** a public destination can carry `overrides:
+  [{ "behavior": "public", "path_pattern" }]`, "Rules that override how Access handles requests to
+  this destination. Each rule can make a matching path public, bypassing Access authentication",
+  whose patterns do not cover subpaths. That would make an exact path public on the Allow app
+  itself without a Bypass app, but it is a different design from this tool's Bypass app, and the
+  guides do not describe it, only the API reference, so it is noted here and not used.
+- **Not confirmed against the live account:** whether `<prefix>/` actually wins for
+  `<prefix>/` itself, and whether `<prefix>/*` wins for its children. The first `--apply` with
+  `/time-track/` will show both, and it rolls back if the children lose.
+- Sources:
+  - [application paths](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/) (Unsupported URLs, Policy inheritance, Limitations)
+  - [create app: `destinations[].uri` and `overrides[].path_pattern`](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/applications/methods/create/)
+  - [delete app](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/applications/methods/delete/)
+  - [Gateway lists: URL slashes](https://developers.cloudflare.com/cloudflare-one/reusable-components/lists/), Gateway only
 
 ### R2 buckets and Worker routes (read 2026-11-02)
 

@@ -29,7 +29,8 @@ export function probeUrls(domain, prefix) {
  * as itself, or a child of it for a `/*` one.
  */
 export function mixedProbes(domain, prefix, publicPaths) {
-  const exactChildren = publicPaths.filter((p) => !p.endsWith("/*")).map((p) => `${p}/${PROBE_SUBPATH}`);
+  // `<prefix>/`'s child is `<prefix>/portfolio-app-verify`, already the second private probe.
+  const exactChildren = publicPaths.filter((p) => !p.endsWith("/*")).map((p) => `${p.replace(/\/$/, "")}/${PROBE_SUBPATH}`);
   const privatePaths = [...new Set([prefix, `${prefix}/${PROBE_SUBPATH}`, `${prefix}/api/${PROBE_SUBPATH}`, ...exactChildren])]
     .filter((path) => !publicPaths.some((p) => pathCovers(p, path)));
   const publicProbes = publicPaths.map((p) => (p.endsWith("/*") ? `${p.slice(0, -1)}${PROBE_SUBPATH}` : p));
@@ -111,14 +112,22 @@ export async function verifyPath({ fetch, domain, prefix, team, publicPaths = []
  * answers come after its private ones, so by the end of a passing round both apps are
  * answering, and a mixed app passes only when a second round, run at once, passes too.
  * A second round that fails is one more failed attempt: polling goes on.
+ *
+ * `mustStayPrivate` lists probe URLs that asked for sign-in before this run made anything
+ * public. If one of them answers without the Access login, the run has exposed it, and
+ * waiting longer only keeps it exposed: the wait stops at once with `exposed` set to them.
  */
-export async function waitForAccess({ fetch, domain, prefix, team, publicPaths = [], attempts = 12, delayMs = 5000, sleep }) {
-  const round = () => verifyPath({ fetch, domain, prefix, team, publicPaths });
+export async function waitForAccess({ fetch, domain, prefix, team, publicPaths = [], mustStayPrivate = [], attempts = 12, delayMs = 5000, sleep }) {
+  const round = async () => {
+    const result = await verifyPath({ fetch, domain, prefix, team, publicPaths });
+    const exposed = result.results.filter((r) => (r.expect ?? "access") === "access" && !r.ok && r.status !== null && mustStayPrivate.includes(r.url));
+    return exposed.length > 0 ? { ...result, ok: false, exposed: exposed.map((r) => r.url) } : result;
+  };
   let last;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     last = await round();
     if (last.ok && publicPaths.length > 0) last = await round();
-    if (last.ok || attempt === attempts) return last;
+    if (last.ok || last.exposed || attempt === attempts) return last;
     await sleep(delayMs);
   }
   return last;

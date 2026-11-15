@@ -2,10 +2,10 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   accessDestinations, allowDestinations, classifyRoute, narrowingDestinations, normalizePrefix, normalizePublicPath, pathCovers,
-  privateDestinations,
+  privateDestinations, publicDestinations,
 } from "../skills/portfolio-app/scripts/lib/prefix.mjs";
-import { checkAccessRedirect, checkSignedOutAnswer, mixedProbes, verifyPath } from "../skills/portfolio-app/scripts/lib/verify.mjs";
-import { appPolicies, isBypassEveryone, withAddedDestinations } from "../skills/portfolio-app/scripts/lib/cloudflare.mjs";
+import { checkAccessRedirect, checkSignedOutAnswer, mixedProbes, verifyPath, waitForAccess } from "../skills/portfolio-app/scripts/lib/verify.mjs";
+import { appPolicies, isBypassEveryone, withAddedDestinations, withoutDestinations } from "../skills/portfolio-app/scripts/lib/cloudflare.mjs";
 import { D1_PLACEHOLDER, d1Target, parseJsonc, r2Target, replacePlaceholder } from "../skills/portfolio-app/scripts/lib/wrangler-config.mjs";
 import { parseConfig, repoFromRemote } from "../skills/portfolio-app/scripts/lib/local.mjs";
 import { ACCESS_LOGIN, DOMAIN, TEAM, WRANGLER_WITH_PLACEHOLDER, fakeFetch } from "./helpers.mjs";
@@ -157,9 +157,68 @@ test("normalizePublicPath keeps a public path inside the app's prefix, exact or 
   assert.equal(normalizePublicPath("/graph/manifest.webmanifest", "/graph"), "/graph/manifest.webmanifest");
   assert.equal(normalizePublicPath("/work/atlas/data/*", "/work/atlas"), "/work/atlas/data/*");
   for (const bad of ["", "/", "/graphs", "/graphx/public", "/quiz/public", "/graph/*", "/*", "/graph/a*", "/graph/*/b",
-    "/graph/..", "/graph/./x", "/graph/", "/graph//x", "/graph/a b", "/graph/x?y", "/graph/x#y"]) {
+    "/graph/..", "/graph/./x", "/graph//x", "/graph/a b", "/graph/x?y", "/graph/x#y"]) {
     assert.throws(() => normalizePublicPath(bad, "/graph"), /refusing public path/, `should refuse ${JSON.stringify(bad)}`);
   }
+});
+
+test("normalizePublicPath accepts the prefix's trailing-slash path exactly, and no other empty segment", () => {
+  assert.equal(normalizePublicPath("/time-track/", "/time-track"), "/time-track/");
+  assert.equal(normalizePublicPath("time-track/", "/time-track"), "/time-track/", "the leading slash stays optional");
+  assert.equal(normalizePublicPath("/work/atlas/", "/work/atlas"), "/work/atlas/");
+  for (const bad of ["/time-track//", "/time-track///", "/time-track//x", "/time-track/x/", "/time-track/_next/", "/time-track/x//y",
+    "/time-track/*/", "/work/", "/time-trac/", "/time-track-old/"]) {
+    assert.throws(() => normalizePublicPath(bad, bad.startsWith("/work") ? "/work/atlas" : "/time-track"),
+      /refusing public path/, `should refuse ${JSON.stringify(bad)}`);
+  }
+  assert.throws(() => normalizePublicPath("/time-track/x/", "/time-track"), /no empty, "\." or "\.\." segments.*the one trailing "\/" allowed is \/time-track\/ itself/);
+});
+
+test("a public <prefix>/ is an exact destination with no narrowing, and its child is the usual private probe", () => {
+  const paths = ["/time-track", "/time-track/_next/*", "/time-track/"];
+  assert.deepEqual(publicDestinations("example.com", paths), ["example.com/time-track", "example.com/time-track/_next/*", "example.com/time-track/"]);
+  assert.deepEqual(privateDestinations("example.com", "/time-track", paths), ["example.com/time-track/*"]);
+  assert.deepEqual(narrowingDestinations("example.com", "/time-track", paths), [], "its narrowing destination would be <prefix>/* itself");
+  assert.equal(pathCovers("/time-track/", "/time-track/"), true);
+  assert.equal(pathCovers("/time-track/", "/time-track/x"), false, "an exact public path, not a directory");
+  assert.deepEqual(mixedProbes("example.com", "/time-track", paths), [
+    { url: "https://example.com/time-track/portfolio-app-verify", expect: "access" },
+    { url: "https://example.com/time-track/api/portfolio-app-verify", expect: "access" },
+    { url: "https://example.com/time-track", expect: "public" },
+    { url: "https://example.com/time-track/_next/portfolio-app-verify", expect: "public" },
+    { url: "https://example.com/time-track/", expect: "public" },
+  ]);
+});
+
+test("waitForAccess stops at once when a probe that asked for sign-in before stops asking", async () => {
+  const login = { status: 302, headers: new Map([["location", `https://${TEAM}.cloudflareaccess.com/cdn-cgi/access/login/x`]]) };
+  const fetch = async (url) => (url.endsWith("/q/portfolio-app-verify") ? { status: 200, headers: new Map() } : login);
+  const exposedUrl = `https://${DOMAIN}/q/portfolio-app-verify`;
+  let sleeps = 0;
+  const sleep = async () => { sleeps += 1; };
+  const watched = await waitForAccess({ fetch, domain: DOMAIN, prefix: "/q", team: TEAM, mustStayPrivate: [exposedUrl], sleep, attempts: 5 });
+  assert.equal(watched.ok, false);
+  assert.deepEqual(watched.exposed, [exposedUrl]);
+  assert.equal(sleeps, 0);
+  const plain = await waitForAccess({ fetch, domain: DOMAIN, prefix: "/q", team: TEAM, sleep, attempts: 5 });
+  assert.equal(plain.exposed, undefined);
+  assert.equal(sleeps, 4, "without the list, a failing probe is waited out to the last attempt");
+  const unreachable = await waitForAccess({ fetch: async () => { throw new Error("socket hang up"); }, domain: DOMAIN, prefix: "/q", team: TEAM,
+    mustStayPrivate: [exposedUrl], sleep, attempts: 2 });
+  assert.equal(unreachable.exposed, undefined, "a request that failed is not an answer");
+});
+
+test("withoutDestinations takes out exactly the named destinations and keeps every other setting", () => {
+  const app = {
+    id: "a1", name: "x (public)", type: "self_hosted", session_duration: "24h",
+    destinations: [{ type: "public", uri: "example.com/x" }, { type: "public", uri: "example.com/x/_next/*" }, { type: "public", uri: "example.com/x/" }],
+    policies: [{ id: "p1", precedence: 1, decision: "bypass" }],
+  };
+  assert.deepEqual(withoutDestinations(app, ["example.com/x/", "example.com/other"]), {
+    ...app,
+    destinations: [{ type: "public", uri: "example.com/x" }, { type: "public", uri: "example.com/x/_next/*" }],
+    policies: [{ id: "p1", precedence: 1 }],
+  });
 });
 
 test("pathCovers and privateDestinations: a public bare prefix leaves only <prefix>/* behind sign-in", () => {

@@ -29,7 +29,8 @@ const USAGE = `usage:
       --public-path (repeatable) makes a mixed app: signed in by default, plus a Bypass
       app "<repo name> (public)" on exactly the listed paths. Each is /<prefix>,
       /<prefix>/<path> or /<prefix>/<path>/*, inside the prefix. A path without /* is
-      public on its own; a path under it is checked to still ask for sign-in.
+      public on its own: the Allow app also gets a narrowing <path>/* for it (none for
+      the bare /<prefix>), so the paths under it stay behind sign-in, and one is checked.
   portfolio-app verify --path /<prefix> [--public-path <path>…] [--domain <host>] [--team <team>]
                        [--config <file>]
       Exits 0 only when the path redirects to Cloudflare Access (with --public-path:

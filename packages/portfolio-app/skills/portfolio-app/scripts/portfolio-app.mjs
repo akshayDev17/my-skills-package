@@ -28,8 +28,8 @@ const USAGE = `usage:
       named in wrangler.jsonc and Worker routes for exactly /<prefix> and /<prefix>/*.
       --public-path (repeatable) makes a mixed app: signed in by default, plus a Bypass
       app "<repo name> (public)" on exactly the listed paths. Each is /<prefix>,
-      /<prefix>/ (exactly the trailing-slash path), /<prefix>/<path> or /<prefix>/<path>/*,
-      inside the prefix. A path without /* is public on its own: the Allow app also gets
+      /<prefix>/ (exactly the trailing-slash path, and only alongside /<prefix>),
+      /<prefix>/<path> or /<prefix>/<path>/*, inside the prefix. A path without /* is public on its own: the Allow app also gets
       a narrowing <path>/* for it (none for /<prefix> or /<prefix>/), so the paths under
       it stay behind sign-in, and one is checked. A newly listed path is added to an
       existing "<repo name> (public)". If the check fails after the run added

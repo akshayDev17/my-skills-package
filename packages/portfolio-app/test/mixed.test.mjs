@@ -610,6 +610,11 @@ test("mixed, time-track re-run with /time-track/ applied: one PUT adds it, the c
   assert.deepEqual(creates(replan), []);
   assert.match(replan.find((a) => a.kind === "bypass-app").summary, /lets anyone reach example\.com\/time-track \+ example\.com\/time-track\/_next\/\* \+ example\.com\/time-track\/$/);
   assert.equal(replan.find((a) => a.kind === "check").state, "ok");
+  assert.equal(replan.filter((a) => a.kind === "coverage").at(-1).summary,
+    `  example.com/time-track/<child> → "time-track (/time-track)" (by example.com/time-track/*) — Allow, sign-in; ` +
+    "example.com/time-track/ covers its subpaths too and the docs do not rank it against example.com/time-track/*, " +
+    "so apply checks a child and reports one that answers signed out; this run does not add example.com/time-track/, so it removes nothing",
+    "a plan that adds nothing does not promise to take time-track/ out again");
 });
 
 test("mixed, time-track re-run with /time-track/ when its children inherit it: apply takes exactly time-track/ out again at once and leaves the rest", async () => {
@@ -707,24 +712,34 @@ test("mixed rollback takes only <domain>/<prefix>/ out of an app that changed af
   assert.deepEqual(world.site.apps[1].destinations.map((d) => d.uri), [`${DOMAIN}/time-track`, `${DOMAIN}/time-track/_next/*`, `${DOMAIN}/time-track/other`]);
 });
 
-test("mixed rollback leaves a Bypass app whose only destination is <domain>/<prefix>/ in place and says to remove it by hand", async () => {
-  const world = timeTrackWorld();
-  world.site.slashOutranksWildcard = true;
-  const h = harness(world);
-  const opts = { ...ttOpts(makeClone(WRANGLER_TT)), publicPaths: ["/time-track/"] };
-  const actions = await planBootstrap(h.deps, opts);
-  const planCalls = h.http.calls.length;
-  await assert.rejects(applyBootstrap(h.deps, actions, opts), (err) => {
-    assert.match(err.message, /Rolled back: left Bypass app "time-track \(public\)" in place: example\.com\/time-track\/ is its only destination, and the tool does not delete an app; remove it in the Zero Trust dashboard now\. /);
-    assert.match(err.message, /After the rollback, the site still fails the check without \/time-track\/: https:\/\/example\.com\/time-track\/portfolio-app-verify answered 200 — not behind Access$/);
-    return true;
-  });
-  assert.deepEqual(api(writes(h.http.calls.slice(planCalls))), ["POST /access/policies", "POST /access/apps", "POST /access/policies", "POST /access/apps"],
-    "nothing is written after the apps are created");
-  assert.deepEqual(world.site.apps.map((a) => [a.name, a.destinations.map((d) => d.uri)]), [
-    ["time-track (/time-track)", [`${DOMAIN}/time-track`, `${DOMAIN}/time-track/*`]],
-    ["time-track (public)", [`${DOMAIN}/time-track/`]],
-  ]);
+test("mixed refuses /<prefix>/ listed without /<prefix>, for a new and an existing public app: a plan conflict, exit 2, nothing written", async () => {
+  const conflict = /public path \/time-track\/ is only accepted alongside \/time-track: if the check fails, apply takes example\.com\/time-track\/ out of the Bypass app again, and the app must have example\.com\/time-track left to keep; add --public-path \/time-track, or drop --public-path \/time-track\//;
+  const cases = [
+    ["a new public app, /time-track/ alone", timeTrackWorld, WRANGLER_TT, ["/time-track/"]],
+    ["a new public app, /time-track/ with another path", timeTrackWorld, WRANGLER_TT, ["/time-track/_next/*", "/time-track/"]],
+    ["the existing public app", timeTrackTodayWorld, WRANGLER_TT_DONE, ["/time-track/_next/*", "/time-track/"]],
+  ];
+  for (const [name, makeWorld, wrangler, publicPaths] of cases) {
+    const world = makeWorld();
+    const before = structuredClone(world.site);
+    const h = harness(world);
+    const opts = { ...ttOpts(makeClone(wrangler)), publicPaths };
+    const actions = await planBootstrap(h.deps, opts);
+    const refusal = conflicts(actions).filter((a) => a.kind === "bypass-app");
+    assert.equal(refusal.length, 1, name);
+    assert.match(refusal[0].summary, conflict, name);
+    assert.ok(!actions.some((a) => a.kind === "bypass-app" && a.state === "create" || a.kind === "bypass-app-add"), `${name}: no public destination is planned`);
+    assert.match(formatPlan(actions, { ...opts, apply: false }), /\n  ✗ public path \/time-track\/ is only accepted alongside \/time-track: /, name);
+    await assert.rejects(applyBootstrap(h.deps, actions, opts), /refusing to apply: \d+ conflict\(s\) in the plan/, name);
+    assert.deepEqual(writes(h.http.calls), [], name);
+    assert.deepEqual(world.site, before, `${name}: nothing changed`);
+
+    const r = await cli(makeWorld(), ["bootstrap", "--repo", TT.repo, "--path", TT.prefix, ...publicPaths.flatMap((p) => ["--public-path", p]),
+      "--clone", makeClone(wrangler), "--config", writeConfig(), "--apply"]);
+    assert.equal(r.code, 2, `${name}: ${r.out}\n${r.err}`);
+    assert.match(r.out, conflict, name);
+    assert.deepEqual(writes(r.http.calls), [], name);
+  }
 });
 
 test("mixed refuses to add a public path to a public app it cannot change unambiguously, and writes nothing", async () => {

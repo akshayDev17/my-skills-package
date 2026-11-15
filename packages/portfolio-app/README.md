@@ -67,7 +67,8 @@ command line, one `--public-path` per path. Nothing is inferred: a path is publi
 is listed. Each path is one of:
 
 - `/<prefix>` itself;
-- `/<prefix>/`, the prefix's trailing-slash path, exactly (see below);
+- `/<prefix>/`, the prefix's trailing-slash path, exactly, and only alongside `/<prefix>` (see
+  below);
 - an exact path under it, such as `/graph/public.txt`;
 - a directory under it with a final `/*`, such as `/graph/_next/*`.
 
@@ -97,9 +98,17 @@ of every page under the prefix, and an Access destination covers its subpaths to
 not say whether `<prefix>/` or the Allow app's `<prefix>/*` is the more specific for
 `<prefix>/<child>` (see the research notes). So the plan says the children are meant for the
 Allow app and that a child is checked, and `--apply` probes `<prefix>/portfolio-app-verify` and
-`<prefix>/api/portfolio-app-verify`, which must still redirect to the login. If they answer signed
-out, or the check fails in any other way, apply takes `<prefix>/` out of the public app again
-(step 5 below).
+`<prefix>/api/portfolio-app-verify`, which must still redirect to the login. If this run added
+`<prefix>/` and they answer signed out, or the check fails in any other way, apply takes
+`<prefix>/` out of the public app again (step 5 below). A run that does not add it (a re-run
+after it is in place) only reports a failed check and removes nothing, and the plan's line for
+the children says which of the two applies.
+
+`/<prefix>/` is accepted only alongside `/<prefix>`. Listing `--public-path /<prefix>/` without
+`--public-path /<prefix>` is a plan conflict (`✗`, exit 2, nothing applied), whether the public
+app is new or already exists. That way the public app always holds the bare prefix, so taking
+`<prefix>/` out again always leaves it a destination to keep, and the tool never has to delete
+an app.
 
 ```sh
 # time-track: everything signed in except the landing page and its static assets
@@ -176,8 +185,8 @@ The Cloudflare Access step, in apply order:
    `+ add narrowing destination(s) … to "<app>"` for the missing ones. That is the one change the
    tool makes to an existing Allow app, and it only shrinks what is public (the other change it
    makes to an existing app is adding newly listed paths to the public app, step 3). Apply reads
-   the app again, refuses if its destinations changed since the plan, and sends it back with `PUT` (which
-   replaces the whole app) carrying every current setting, the same policies by id and
+   the app again, refuses if its destinations changed since the plan, and sends it back with
+   `PUT` (which replaces the whole app) carrying every current setting, the same policies by id and
    precedence, and only the missing destinations added. It never removes or alters any other
    destination, policy or setting. This comes before the Bypass app, so no child is ever public.
 2. **The Bypass policy.** Find or create one reusable policy named `portfolio-app public`, with
@@ -212,9 +221,10 @@ The Cloudflare Access step, in apply order:
    no app is deleted, and nothing that existed before the run is removed. Then it runs the
    wait again with the other public paths, and reports both: the original failure, what it
    removed, and whether the site passes the check without `<prefix>/`. It exits 1 either way,
-   and D1 and GitHub are not touched. A Bypass app whose only destination is
-   `<domain>/<prefix>/` cannot lose it and stay an app, so it is left in place and the error
-   says to remove it by hand.
+   and D1 and GitHub are not touched. The error reads `Rolled back: removed <domain>/<prefix>/
+   from Bypass app "<name>", which keeps …`, naming what the app still holds; the bare
+   `<domain>/<prefix>` is always among it, because `/<prefix>/` is planned only alongside
+   `/<prefix>`.
    Before such a run adds `<domain>/<prefix>/`, apply records which private probes ask for
    sign-in. If one of those answers signed out during the wait, the run has made it public, so
    the wait stops at once and the destination comes out, instead of staying public until the
@@ -285,8 +295,9 @@ ok, `1` a step failed, `2` usage error or a conflict in the plan.
     that holds anything beyond the listed paths, or only some of them but is not Bypass for
     Everyone or cannot take a plain `PUT`; an app holding exactly the listed paths
     that is not Bypass for Everyone; a Bypass app that opens more of the prefix than the list
-    (say `<domain>/graph/api/*` when only `/graph/api/public/*` is listed); and a
-    `portfolio-app public` policy that is not Bypass for Everyone;
+    (say `<domain>/graph/api/*` when only `/graph/api/public/*` is listed); a
+    `portfolio-app public` policy that is not Bypass for Everyone; and `/<prefix>/` listed
+    without `/<prefix>`;
   - a clone of a different repo;
   - placeholder entries that name more than one database; with `--public`, `r2_buckets` that
     name several buckets, an entry with no `bucket_name` or an invalid one, or a
@@ -518,8 +529,9 @@ security add-generic-password -s portfolio-app -a cloudflare-deploy-token -w
   narrowing destination cannot settle it, since `<prefix>/`'s would be `<prefix>/*` itself. So
   the tool relies on its probes. `<prefix>/portfolio-app-verify` and
   `<prefix>/api/portfolio-app-verify` must still redirect after `<prefix>/` is added. If they
-  answer signed out, the run takes `<prefix>/` out of the Bypass app again at once (step 5 of
-  the mixed app's Access step) and exits 1. It removes that one destination and nothing else.
+  answer signed out, the run that added it takes `<prefix>/` out of the Bypass app again at
+  once (step 5 of the mixed app's Access step) and exits 1. It removes that one destination and
+  nothing else.
 - **Also documented, not used:** a public destination can carry `overrides:
   [{ "behavior": "public", "path_pattern" }]`, "Rules that override how Access handles requests to
   this destination. Each rule can make a matching path public, bypassing Access authentication",

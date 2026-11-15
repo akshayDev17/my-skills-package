@@ -639,8 +639,9 @@ security add-generic-password -s portfolio-app -a cloudflare-deploy-token -w
   `POST /accounts/{account_id}/r2/buckets` with `{ "name" }` creates one and needs
   `Workers R2 Storage Write`. A missing bucket answers 404, which the plan reads as "create".
 - **Routes:** `GET`/`POST /zones/{zone_id}/workers/routes`, items `{ id, pattern, script }`,
-  and `DELETE /zones/{zone_id}/workers/routes/{route_id}`, needing `Workers Routes Read`/`Write`. The zone id comes from `GET /zones?name=<domain>`,
-  which lists only zones the token can read, so an empty answer means a missing Zone Read.
+  and `DELETE /zones/{zone_id}/workers/routes/{route_id}`, needing `Workers Routes Read`/`Write`.
+  The zone id comes from `GET /zones?name=<domain>`, which lists only zones the token can read,
+  so an empty answer means a missing Zone Read.
 - **Routes need a deployed Worker:** the create docs do not say so, but creating a route for a
   missing script is reported (in a Stack Overflow question, not the docs) to fail with
   `10019: workers.api.error.invalid_route_script_missing`.

@@ -11,6 +11,10 @@ The cluster rules are the app's own (frontend/lib/canvas.ts):
   tags; that line is not part of the note's text;
 - a labelled group box is a cluster of the cards wholly inside it;
 - names normalize (lowercase, spaces to ``-``), so group "Backend" and ``#backend`` merge.
+
+Because a box holds whatever lies wholly inside it, making or refitting a box is a
+layout problem: the box is drawn around its members, and cards move where that is
+needed for it to enclose only them (``fit_box``).
 """
 
 from __future__ import annotations
@@ -34,6 +38,10 @@ STEP = 60          # how finely positions are tried
 RINGS = 40         # how far out, in steps, before giving up on "near"
 COLUMN_GAP = 160   # between the columns of notes laid out together: room for a link's label
 ROW_GAP = 40       # between notes in one column
+BOX_PAD = 40       # clear space between a group box's edge and its cards, on every side
+LABEL_BAR = 44     # the app's label bar across a box's top (all a collapsed box shows)
+BOX_TOP = LABEL_BAR + BOX_PAD  # above its cards: the label bar, then the same clear space as elsewhere
+BOX_CLEAR = 16     # how near another card or box may stay to a box and still count as outside it
 
 
 class EditError(ValueError):
@@ -141,7 +149,8 @@ def plain(canvas: dict) -> dict:
         elif n.get("type") == "group":
             label = n.get("label") if isinstance(n.get("label"), str) and n["label"].strip() else None
             inside = [m["id"] for m in nodes if m.get("type") != "group" and is_inside(m, n)]
-            groups.append({"id": n["id"], "label": label, "cluster": _group_cluster(n), "contains": inside})
+            groups.append({"id": n["id"], "label": label, "cluster": _group_cluster(n), "contains": inside,
+                           "collapsed": n.get("collapsed") is True})
         else:
             what = {"link": ("web page", "url"), "file": ("file", "file")}.get(n.get("type"), ("card", "text"))
             others.append({"id": n["id"], "kind": what[0], what[1]: n.get(what[1]), "clusters": sorted(of[n["id"]])})
@@ -490,8 +499,9 @@ def add_notes(canvas: dict, notes: list[dict], links: list[dict] = ()) -> tuple[
 
 def update_notes(canvas: dict, changes: list[dict]) -> tuple[dict, list[str]]:
     """``canvas`` with each ``{id, text?, clusters?}`` applied to its note, and a notice
-    for each cluster a note keeps because it comes from a group box (which only moving
-    the card can change). ``clusters`` replaces the note's tags; ``text`` its body."""
+    for each cluster a note keeps because it comes from a group box (which only the box
+    no longer holding the card can change: update_group_boxes, or moving the card in the
+    web app). ``clusters`` replaces the note's tags; ``text`` its body."""
     nodes = canvas.get("nodes") or []
     replaced: dict[str, dict] = {}
     for change in changes:
@@ -512,7 +522,7 @@ def update_notes(canvas: dict, changes: list[dict]) -> tuple[dict, list[str]]:
         tags = split_tags(_text(_find(after["nodes"], card_id)))[1]
         notices += [
             f"note '{card_id}' is still in cluster '{name}': it sits inside the group box of that name, "
-            "and leaves it only when the card is moved out of the box in the web app"
+            "and leaves it only when the box stops holding it (update_group_boxes with the box's new notes)"
             for name in of[card_id] if name not in tags
         ]
     return after, notices
@@ -556,3 +566,250 @@ def remove_links(canvas: dict, ids: list[str]) -> dict:
         if link_id not in known:
             raise EditError(f"'{link_id}' names no link in this graph; read the graph for its link ids")
     return {**canvas, "edges": [e for e in edges if e["id"] not in set(ids)]} if ids else canvas
+
+
+# ── group boxes ────────────────────────────────────────────────────────────
+
+def _label_width(label: str) -> int:
+    """The least width that shows ``label`` in the app's label bar: "▾ " and the label
+    in bold, with the bar's 12px padding either side."""
+    return 24 + 16 + math.ceil(9 * len(label))
+
+
+def _overlaps(a: dict, b: dict) -> bool:
+    return not _apart(a, b, BOX_CLEAR)
+
+
+def _rect_around(cards: list[dict], label: str) -> dict:
+    """The box drawn around ``cards``: their bounds and the box's padding, wide enough for its label."""
+    left, top = min(c["x"] for c in cards), min(c["y"] for c in cards)
+    right, bottom = max(c["x"] + c["width"] for c in cards), max(c["y"] + c["height"] for c in cards)
+    return {"x": left - BOX_PAD, "y": top - BOX_TOP,
+            "width": max(right - left + 2 * BOX_PAD, _label_width(label)), "height": bottom - top + BOX_TOP + BOX_PAD}
+
+
+def _reading_order(cards: list[dict]) -> list[dict]:
+    return sorted(cards, key=lambda c: (c["y"], c["x"], c["id"]))
+
+
+def fit_box(nodes: list[dict], edges: list[dict], box_id: str, label: str,
+            members: list[str]) -> tuple[dict, dict[str, tuple[int, int]]]:
+    """Where box ``box_id`` goes so that it holds ``members`` and nothing else, and the
+    cards that must move for that: ``(x, y, width and height of the box, {card id: new top-left})``.
+
+    A card or box that comes within ``BOX_CLEAR`` of the box counts as in it; the box
+    itself, when it is already there, is no obstacle. With ``R`` the box drawn around
+    the members where they are, the first case that applies (so the fewest cards move):
+
+    1. nothing else is in ``R``: the box is ``R`` and nothing moves;
+    2. only cards are in ``R``, fewer of them than there are members (none of them is in
+       a box: that box would be in ``R`` too): each moves to the nearest free spot,
+       outside every box and outside ``R``;
+    3. only boxes are in ``R`` (a member sits in another box, or ``R`` crosses one): the
+       members move together, arranged as they are, to the nearest place where the box
+       is clear of everything;
+    4. otherwise the members are laid out afresh (along their links, as ``add_notes``
+       lays out new notes, or in a grid) and placed as in 3.
+
+    A card that moves never lands in a box, so the only clusters a move changes are
+    those of a box a member had to leave.
+    """
+    of = {n["id"]: n for n in nodes}
+    chosen = set(members)
+    cards = [of[m] for m in members]
+    rest = [n for n in nodes if n["id"] != box_id and n["id"] not in chosen]
+    rect = _rect_around(cards, label)
+    intruders = [n for n in rest if n.get("type") != "group" and _overlaps(n, rect)]
+    clashes = [n for n in rest if n.get("type") == "group" and _overlaps(n, rect)]
+    if not intruders and not clashes:
+        return rect, {}
+    if not clashes and len(intruders) < len(members):
+        staying = [n for n in rest if n not in intruders] + cards + [{**rect, "id": box_id, "type": "group"}]
+        moves = {}
+        for n in _reading_order(intruders):
+            moves[n["id"]] = free_spot(staying, _center([n]), (n["width"], n["height"]), set())
+            staying.append({**n, "x": moves[n["id"]][0], "y": moves[n["id"]][1]})
+        return rect, moves
+    if intruders:
+        sizes = {c["id"]: (c["width"], c["height"]) for c in _reading_order(cards)}
+        among = [(e["fromNode"], e["toNode"]) for e in edges
+                 if e["fromNode"] in chosen and e["toNode"] in chosen and e["fromNode"] != e["toNode"]]
+        at = flow_layout(sizes, among) if among else _grid(sizes)
+    else:
+        left, top = min(c["x"] for c in cards), min(c["y"] for c in cards)
+        at = {c["id"]: (c["x"] - left, c["y"] - top) for c in cards}
+    width = max(max(at[c["id"]][0] + c["width"] for c in cards) + 2 * BOX_PAD, _label_width(label))
+    height = max(at[c["id"]][1] + c["height"] for c in cards) + BOX_TOP + BOX_PAD
+    x, y = free_spot(rest, _center([rect]), (width, height), set())
+    return ({"x": x, "y": y, "width": width, "height": height},
+            {m: (x + BOX_PAD + at[m][0], y + BOX_TOP + at[m][1]) for m in members})
+
+
+def widen_box(nodes: list[dict], box: dict, label: str) -> tuple[dict, dict[str, tuple[int, int]]]:
+    """How box ``box`` changes when it is renamed to ``label``, and the cards that must
+    move for that: ``({x and width of the box}, {card id: new top-left})``.
+
+    A rename never re-lays a box: its y, height and the cards wholly inside it stay. A box
+    already wide enough to show the label keeps its place and size (``{}``). A narrower one
+    widens just as far as the label needs, to the right, or to the left (its right edge
+    kept) when the new strip on the right would come within ``BOX_CLEAR`` of another box;
+    when both sides would, the rename is refused. Every other card the new strip would
+    cover or come within ``BOX_CLEAR`` of moves to the nearest free spot, outside every box.
+    """
+    need = _label_width(label)
+    if box["width"] >= need:
+        return {}, {}
+    extra = need - box["width"]
+    others = [n for n in nodes if n["id"] != box["id"]]
+    for strip_x in (box["x"] + box["width"], box["x"] - extra):
+        strip = {"x": strip_x, "y": box["y"], "width": extra, "height": box["height"]}
+        if any(n.get("type") == "group" and _overlaps(n, strip) for n in others):
+            continue
+        rect = {"x": min(box["x"], strip_x), "width": need}
+        intruders = [n for n in others if n.get("type") != "group" and not is_inside(n, box) and _overlaps(n, strip)]
+        staying = [n for n in others if n not in intruders] + [{**box, **rect}]
+        moves = {}
+        for n in _reading_order(intruders):
+            moves[n["id"]] = free_spot(staying, _center([n]), (n["width"], n["height"]), set())
+            staying.append({**n, "x": moves[n["id"]][0], "y": moves[n["id"]][1]})
+        return rect, moves
+    raise EditError(f"group box '{box['id']}' is too narrow to show the label '{label}' ({need}px wide), and "
+                    "another group box is in the way on both sides; choose a shorter label")
+
+
+def _patched(item: dict, patch: dict) -> dict:
+    """``item`` with ``patch`` applied as the app applies one: a key already there keeps its
+    place, a new key goes last, and ``None`` removes the key."""
+    after = dict(item)
+    for key, value in patch.items():
+        if value is None:
+            after.pop(key, None)
+        else:
+            after[key] = value
+    return after
+
+
+def _moved(nodes: list[dict], moves: dict[str, tuple[int, int]]) -> list[dict]:
+    return [_patched(n, {"x": moves[n["id"]][0], "y": moves[n["id"]][1]}) if n["id"] in moves else n for n in nodes]
+
+
+def _box_label(label: str | None) -> str:
+    if not isinstance(label, str) or not label.strip():
+        raise EditError("a group box needs a label: it names the cluster of the notes inside it")
+    return label.strip()
+
+
+def _box_members(nodes: list[dict], ids: list[str], claimed: dict[str, str], box: str) -> list[str]:
+    """``ids`` checked as what ``box`` can hold: at least one card of this graph, no box,
+    and no card another box of the same call holds (``claimed``: card id -> that box)."""
+    if not ids:
+        raise EditError("a group box must hold at least one note; to take a box away, use remove_group_boxes")
+    for card_id in ids:
+        if _find(nodes, card_id, "note").get("type") == "group":
+            raise EditError(f"'{card_id}' is a group box; a box holds notes and other cards, not boxes")
+        if claimed.get(card_id, box) != box:
+            raise EditError(f"'{card_id}' is given to two boxes in one call; boxes never overlap, so a card is in one at most")
+    for card_id in ids:
+        claimed[card_id] = box
+    return list(dict.fromkeys(ids))
+
+
+def _box_report(nodes: list[dict], box: dict) -> dict:
+    return {"id": box["id"], "label": box.get("label"), "cluster": _group_cluster(box),
+            "contains": [n["id"] for n in nodes if n.get("type") != "group" and is_inside(n, box)],
+            "collapsed": box.get("collapsed") is True}
+
+
+def _moves_report(before: list[dict], after: list[dict], boxes: set[str]) -> tuple[list[str], list[str]]:
+    """The cards whose place changed, and a notice for each box (other than ``boxes``,
+    the ones this call made or changed) that a moved card left, and so its cluster."""
+    was = {n["id"]: n for n in before}
+    moved = [n["id"] for n in after if n["id"] in was and n.get("type") != "group"
+             and (n["x"], n["y"]) != (was[n["id"]]["x"], was[n["id"]]["y"])]
+    notices = []
+    for card_id in moved:
+        now = next(n for n in after if n["id"] == card_id)
+        for g in before:
+            if g.get("type") == "group" and g["id"] not in boxes and is_inside(was[card_id], g) and not is_inside(now, g):
+                name = _group_cluster(g)
+                notices.append(f"'{card_id}' was moved out of group box '{g['id']}'"
+                               + (f", so it is no longer in cluster '{name}'" if name else ""))
+    return moved, notices
+
+
+def add_group_boxes(canvas: dict, boxes: list[dict]) -> tuple[dict, list[dict], list[str], list[str]]:
+    """``canvas`` with a new group box per ``{label, notes, collapsed?}`` holding exactly
+    those cards (``fit_box``; boxes are made in the order given, each clear of the ones
+    before); the plain form of the new boxes; the cards that moved; and notices.
+
+    A new box is the group node the web app makes ({type, label, width, height, id, x,
+    y}, in that order, no colour), with ``collapsed: true`` last when it starts
+    collapsed, as the app's "Starts collapsed" writes it. It goes last in the canvas,
+    as the app adds one.
+    """
+    before = list(canvas.get("nodes") or [])
+    nodes, edges = list(before), canvas.get("edges") or []
+    claimed: dict[str, str] = {}
+    made = []
+    for spec in boxes:
+        label = _box_label(spec.get("label"))
+        box_id = new_id({"nodes": nodes, "edges": edges})
+        members = _box_members(nodes, spec.get("notes") or [], claimed, box_id)
+        rect, moves = fit_box(nodes, edges, box_id, label, members)
+        nodes = _moved(nodes, moves)
+        box = {"type": "group", "label": label, "width": rect["width"], "height": rect["height"],
+               "id": box_id, "x": rect["x"], "y": rect["y"], **({"collapsed": True} if spec.get("collapsed") else {})}
+        nodes.append(box)
+        made.append(box_id)
+    if not made:
+        return canvas, [], [], []
+    moved, notices = _moves_report(before, nodes, set(made))
+    return {**canvas, "nodes": nodes}, [_box_report(nodes, _find(nodes, b)) for b in made], moved, notices
+
+
+def update_group_boxes(canvas: dict, changes: list[dict]) -> tuple[dict, list[dict], list[str], list[str]]:
+    """``canvas`` with each ``{id, label?, notes?, collapsed?}`` applied to its group box:
+    ``label`` renames it (and so its cluster; the box keeps its place, its size and the
+    cards inside it, and only widens when it is too narrow to show the new label,
+    ``widen_box``), ``notes`` is the full new set of cards it
+    holds (the box is refitted around them, ``fit_box``), ``collapsed`` sets whether it
+    starts collapsed. What is left out stays, and so does every other field of the box
+    (its colour, anything the app or Obsidian added). Returns the boxes as they are now,
+    the cards that moved, and notices."""
+    before = list(canvas.get("nodes") or [])
+    nodes, edges = list(before), canvas.get("edges") or []
+    claimed: dict[str, str] = {}
+    for change in changes:
+        box = _find(nodes, change["id"])
+        if box.get("type") != "group":
+            raise EditError(f"'{change['id']}' is not a group box; read the graph's group_boxes for their ids")
+        patch: dict = {}
+        if change.get("label") is not None:
+            patch["label"] = _box_label(change["label"])
+        label = patch.get("label") or (box["label"] if isinstance(box.get("label"), str) else "")
+        if change.get("notes") is not None:
+            members = _box_members(nodes, change["notes"], claimed, box["id"])
+            rect, moves = fit_box(nodes, edges, box["id"], label, members)
+        elif "label" in patch:
+            rect, moves = widen_box(nodes, box, label)
+        else:
+            rect, moves = {}, {}
+        nodes = _moved(nodes, moves)
+        patch |= rect
+        if change.get("collapsed") is not None:
+            patch["collapsed"] = True if change["collapsed"] else None
+        nodes = [_patched(n, patch) if n["id"] == box["id"] else n for n in nodes]
+    changed = list(dict.fromkeys(c["id"] for c in changes))
+    after = {**canvas, "nodes": nodes} if nodes != before else canvas
+    moved, notices = _moves_report(before, nodes, set(changed))
+    return after, [_box_report(nodes, _find(nodes, b)) for b in changed], moved, notices
+
+
+def remove_group_boxes(canvas: dict, ids: list[str]) -> tuple[dict, list[str]]:
+    """``canvas`` without those group boxes, and without any link drawn to a box itself
+    (returned, as link ids). The cards inside stay exactly where they are."""
+    nodes = canvas.get("nodes") or []
+    for box_id in ids:
+        if _find(nodes, box_id).get("type") != "group":
+            raise EditError(f"'{box_id}' is not a group box; remove_notes removes notes and cards")
+    return remove_cards(canvas, ids)

@@ -14,7 +14,8 @@ graph-notes is a personal knowledge-graph app. A person keeps several **graphs**
 graph is a drawing of **notes** joined by **links**, which the app lays out on a canvas.
 These tools let you read and change a graph as notes and links. You never deal with the
 canvas: this server places new notes on it and keeps every existing position, size,
-colour and style exactly as it was.
+colour and style exactly as it was. The one exception is drawing or refitting a group
+box, which moves notes only where the box needs it, and says which.
 
 ## The parts of a graph
 
@@ -29,10 +30,23 @@ colour and style exactly as it was.
   be in several clusters. You put a note in clusters with its `clusters` list; names are
   lowercase with `-` for spaces (they are stored as `#tags` on the note's last line, as
   in Obsidian, so do not also write them into the text).
-- **Group box**: a labelled rectangle the person drew on the canvas. The cards inside it
-  form a cluster named after its label. You can read group boxes but not draw or resize
-  them; that is done in the web app. A note you add with the box's cluster name is
-  placed inside the box when there is room.
+- **Group box**: a labelled rectangle drawn around some notes. The cards inside it form a
+  cluster named after its label, so a box is the way to show a stage or a part of the
+  graph at a glance. Each box has an `id`; `read_graph` lists the boxes in `group_boxes`,
+  with the notes each one `contains` and whether it starts `collapsed`.
+  - `add_group_boxes` draws boxes, each with a `label` around the `notes` you name (their
+    ids). A box holds exactly the notes inside it, so the server sizes it to them and,
+    when other notes or another box are in the way, moves notes until each box holds
+    only its own notes and no two boxes overlap. Every note that moved is listed in the
+    result as `moved`. Draw boxes after adding the notes and their links.
+  - `update_group_boxes` renames a box (`label`, which renames its cluster; the box stays
+    where it is and only widens when the new label needs more room), changes which notes
+    it holds (`notes`: the full new set; the box is refitted around them), or sets
+    `collapsed`.
+  - `remove_group_boxes` takes boxes away; their notes stay where they are.
+  - `collapsed: true` makes a box start collapsed in the web app: only its label shows, and
+    its notes and their links are hidden until the reader clicks the label to open it.
+  A note you add with a box's cluster name is placed inside that box when there is room.
 - **Other cards**: a graph may also hold web-page cards and file cards. You can read,
   link and remove them, but not create them.
 
@@ -49,7 +63,7 @@ colour and style exactly as it was.
   overwritten.
 - Each tool call that changes notes or links saves one version, so put related changes
   in one call: `add_notes` (notes and their links), `update_notes`, `remove_notes`,
-  `link_notes` and `unlink_notes` all take a list.
+  `link_notes`, `unlink_notes` and the three group-box tools all take a list.
 - `trash_graph` moves a graph to the **trash**; `list_trash` shows the trash and
   `restore_from_trash` brings a graph back with its whole history, for as long as the
   app keeps it there. No tool here deletes a graph forever: that is for the person to
@@ -72,5 +86,7 @@ those, but not change them.
    their links are laid out left to right along them, so the graph reads well; a note
    with `near` = the id of an existing note is placed beside that note. Use `link_notes`
    only to link notes that are already there.
-4. Tell the person what changed and give them the graph's `url`.
+4. If parts of the graph belong together (the stages of a pipeline, say), `add_group_boxes`
+   with one box per part, all in one call.
+5. Tell the person what changed and give them the graph's `url`.
 """

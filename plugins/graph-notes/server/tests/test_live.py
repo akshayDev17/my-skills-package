@@ -130,6 +130,27 @@ async def live_run(report) -> None:
             assert len(copy_graph["links"]) == 2
             report(f"copy_graph: {copy} holds the same notes and links")
 
+            boxed = await ok("add_group_boxes", slug=slug, version=10, boxes=[
+                {"label": "Start", "notes": [first, second]}, {"label": "End", "notes": [third], "collapsed": True}])
+            start, end = boxed["added"]
+            assert boxed["version"] == 11 and start["contains"] == [first, second] and end["contains"] == [third]
+            assert end["collapsed"] is True and start["collapsed"] is False
+            graph = await ok("read_graph", slug=slug)
+            assert graph["group_boxes"] == boxed["added"]
+            assert {c["name"]: c["members"] for c in graph["clusters"] if c["made_by"] != "tags"} == {
+                "start": [first, second], "end": [third]}
+            report(f"add_group_boxes: two boxes, one collapsed, each holding only its notes (moved: {boxed['moved']})")
+
+            changed = await ok("update_group_boxes", slug=slug, version=11, boxes=[
+                {"id": start["id"], "label": "Beginning", "notes": [first]}, {"id": end["id"], "collapsed": False}])
+            assert changed["version"] == 12 and changed["updated"][0]["contains"] == [first]
+            assert changed["updated"][0]["cluster"] == "beginning" and changed["updated"][1]["collapsed"] is False
+            removed = await ok("remove_group_boxes", slug=slug, version=12, box_ids=[end["id"]])
+            graph = await ok("read_graph", slug=slug)
+            assert removed["version"] == 13 and [b["id"] for b in graph["group_boxes"]] == [start["id"]]
+            assert [n["id"] for n in graph["notes"]] == [first, second, third]
+            report("update_group_boxes, remove_group_boxes: renamed and refitted, opened, removed with its note kept")
+
             trashed = await ok("trash_graph", slug=slug)
             assert trashed["trashed_at"]
             assert slug in [g["slug"] for g in (await ok("list_trash"))["trash"]]

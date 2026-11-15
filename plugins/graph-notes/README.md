@@ -6,14 +6,16 @@ links and clusters, kept as an Obsidian canvas. The plugin bundles two things:
 
 - **The graph-notes MCP server** (`server/`), a local stdio server (Python, FastMCP) that Claude
   Code starts from this plugin's `.mcp.json`. Its tools list, read, create, copy and rename
-  graphs; add, change, remove, link and unlink notes; browse and restore history; make a graph
+  graphs; add, change, remove, link and unlink notes; draw, rename, refit, collapse and remove
+  group boxes; browse and restore history; make a graph
   public or private; and move graphs to the trash and back. No tool deletes a graph forever.
-  The model works with notes and links, and the server places new cards on the canvas while
-  leaving everything else as it was. Every change names the version it was made from, so a
+  The model works with notes, links and boxes, and the server places new cards on the canvas
+  while leaving everything else as it was (a box it draws or refits moves only the notes in its
+  way, and says which). Every change names the version it was made from, so a
   change made from an outdated copy saves nothing and never overwrites newer work.
 - **A skill** (`skills/graph-notes/SKILL.md`) that teaches the model what a graph is (an
   Obsidian canvas: cards, edges, tag clusters, group boxes) and how to edit one well through
-  those tools.
+  those tools, including how to group a graph's parts in titled, collapsible boxes.
 
 The server's code is bundled in the plugin, so you need no access to the graph-notes repo and
 no clone. Works in Claude Code only.
@@ -74,8 +76,8 @@ the notes in the `reading-list` graph". The tools appear as
 `server/` is a copy of the private graph-notes repo's `mcp-server/` directory, which is where the
 server is developed. The copy is never edited here.
 
-- **Copied from:** graph-notes commit `3ab2c80553ab88c428d059322f3e4cb44180c34b`
-  (graph-notes PR 18, the server's first release, 0.1.0).
+- **Copied from:** graph-notes commit `593910e648eea53e37e4c266a2cf41940ae4e41a`
+  (graph-notes PR 20, which added the group-box tools).
 - `SERVER_SOURCE` records that commit and a sha256 for every file in `server/`. CI
   (`scripts/check-path-plugins.mjs`) fails if `server/` differs from it in any way: a file
   changed, added or removed by hand. It also fails if this README names a different commit.

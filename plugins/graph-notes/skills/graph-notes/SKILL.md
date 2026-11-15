@@ -1,6 +1,6 @@
 ---
 name: graph-notes
-description: Use when the person asks to look at, create, add to, reorganise or fix one of their graph-notes graphs (knowledge graphs drawn as Obsidian canvases in the graph-notes app), or to turn notes, a document or a conversation into a graph, through the graph-notes MCP tools (list_graphs, read_graph, add_notes and the rest).
+description: Use when the person asks to look at, create, add to, reorganise or fix one of their graph-notes graphs (knowledge graphs drawn as Obsidian canvases in the graph-notes app), to box or group parts of one, or to turn notes, a document or a conversation into a graph, through the graph-notes MCP tools (list_graphs, read_graph, add_notes, add_group_boxes and the rest).
 ---
 
 # graph-notes: reading and editing graphs well
@@ -16,7 +16,9 @@ A graph is an **Obsidian canvas**: a [JSON Canvas](https://jsoncanvas.org) docum
 canvas exactly as Obsidian would write it, and the person can download any graph and open it in
 Obsidian. These tools never show you that drawing. A read gives you the graph as plain parts,
 and an edit names the parts to change. The server places new cards on the canvas and keeps
-every existing card's position, size, colour and style as they were.
+every existing card's position, size, colour and style as they were. The one exception is
+drawing or refitting a group box, which moves notes only where the box needs room, and says
+which.
 
 | Part | On the canvas | What you see and send |
 |---|---|---|
@@ -24,14 +26,13 @@ every existing card's position, size, colour and style as they were.
 | **Note** | a text card | `id` (stable), `text` (Markdown), `clusters` |
 | **Link** | an edge | `id`, `from_note` → `to_note`, optional `label`, `direction`: `forward` (default), `both`, `none` |
 | **Cluster** | `#tags` on a card's last line, or a labelled group box | a name, lowercase with `-`; a note can be in several |
-| **Group box** | a group node the person drew | read-only: its label names a cluster of the cards inside it |
+| **Group box** | a group node | `id`, `label`, the notes it `contains`, `collapsed`; its label names a cluster of the cards inside it |
 | **Other cards** | web-page and file cards | read, link and remove them; you cannot create them |
 
 Cluster names are stored as a final line of `#tags`, as in Obsidian. Pass them in
 `clusters` and never type `#tags` into a note's text. A group box labelled "Backend" and the
-tag `#backend` are the same cluster. You cannot draw, move or resize group boxes; the person
-does that in the web app. A new note with the box's cluster name goes inside the box when
-there is room.
+tag `#backend` are the same cluster. A new note with a box's cluster name goes inside that box
+when there is room.
 
 The server's own `about_graphs` tool returns its guide to this model. Call it if anything
 here seems to disagree with what the tools do; the server is the authority.
@@ -47,9 +48,54 @@ here seems to disagree with what the tools do; the server is the authority.
    already linked.
 3. **Make the change in as few calls as possible.** Each call that changes notes or links saves
    one new version, and the history is what the person browses later. Put related changes in
-   one call. `add_notes`, `update_notes`, `remove_notes`, `link_notes` and `unlink_notes` all
-   take lists.
-4. **Report back**: say what changed (notes added, links, clusters) and give the graph's `url`.
+   one call. `add_notes`, `update_notes`, `remove_notes`, `link_notes`, `unlink_notes`,
+   `add_group_boxes`, `update_group_boxes` and `remove_group_boxes` all take lists.
+4. **Box the parts**: when the graph has parts (the stages of a pipeline, say), finish with one
+   `add_group_boxes` call with a box per part.
+5. **Report back**: say what changed (notes added, links, clusters, boxes, notes that moved)
+   and give the graph's `url`.
+
+## Group boxes: titled, collapsible parts of a graph
+
+A group box is a labelled rectangle around some notes. It shows a stage or a part of the graph
+at a glance (the stages of a pipeline, the layers of a system, the sides of an argument), and a
+collapsed box folds that part down to its title until the reader opens it. `read_graph` lists
+the boxes in `group_boxes`, each with its `id`, `label`, the notes it `contains` and whether it
+starts `collapsed`. All three box tools take a list and save one version per call.
+
+- **Create**: `add_group_boxes` draws boxes, each with a `label` around the `notes` you name
+  (their ids), optionally `collapsed: true`. Draw boxes after the notes and their links exist,
+  so take the ids from the result of `add_notes` or from `read_graph`.
+- **Rename**: `update_group_boxes` with `id` and a new `label`. That renames the box's cluster
+  too. The box stays where it is and only widens if the new label needs more room.
+- **Refit**: `update_group_boxes` with `id` and `notes`, the full new set it should hold. The
+  box is refitted around exactly those notes.
+- **Collapse or open**: `update_group_boxes` with `id` and `collapsed`. `true` makes the box
+  start collapsed in the web app: only its label shows, and its notes and their links stay
+  hidden until the reader clicks the label. `false` makes it start open.
+- **Remove**: `remove_group_boxes` with the box ids. The notes stay where they are, with their
+  links, and leave only the box's cluster. A link drawn to the box itself is removed with it.
+
+A box holds exactly the notes inside it. So the server sizes each box to its notes and, when
+other notes or another box are in the way, moves notes until each box holds only its own and no
+two boxes overlap. The result lists every note that `moved`, plus any `notices`; tell the person
+what moved.
+
+To box a graph well:
+
+- **One box per part, all in one `add_group_boxes` call**, as the last step of building a graph
+  that has parts. Every note in a part goes in its box; a note that belongs to no part stays
+  outside all of them.
+- **Title each box with a short name for the part** ("Ingest", "Training", "Serving"), not a
+  sentence. The title is all a reader sees of a collapsed box, and it is also the cluster name.
+- **The box is the cluster.** A box already makes its notes a cluster named after its label, so
+  there is no need to add that name to their `clusters` too. Reuse an existing cluster's name as
+  the label when the box shows that cluster.
+- **Collapse for detail, not for the main path.** Keep the parts a reader needs first open, and
+  start collapsed the boxes that hold detail they open on demand (background, alternatives,
+  appendices). Collapse only when the person asks or the graph is large enough that it helps.
+- **Boxes do not nest or overlap.** If two parts share a note, put it in one box and link it to
+  the other part.
 
 ## Versions: never overwrite newer work
 

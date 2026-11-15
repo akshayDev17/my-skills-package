@@ -103,12 +103,20 @@ export async function verifyPath({ fetch, domain, prefix, team, publicPaths = []
   return { ok: privateProbes > 0 && results.every((r) => r.ok), results };
 }
 
-/** Access takes a few seconds to start answering for a new app; poll before calling it a failure. */
+/**
+ * Access takes a few seconds to start answering for a new app; poll before calling it a
+ * failure. A mixed app has two apps that start answering at different moments, so a
+ * round can pass on private answers taken before the Bypass app was live. Its public
+ * answers come after its private ones, so by the end of a passing round both apps are
+ * answering; a second round, run at once, is the one that decides.
+ */
 export async function waitForAccess({ fetch, domain, prefix, team, publicPaths = [], attempts = 12, delayMs = 5000, sleep }) {
+  const round = () => verifyPath({ fetch, domain, prefix, team, publicPaths });
   let last;
   for (let attempt = 1; attempt <= attempts; attempt++) {
-    last = await verifyPath({ fetch, domain, prefix, team, publicPaths });
-    if (last.ok || attempt === attempts) return last;
+    last = await round();
+    if (last.ok) return publicPaths.length > 0 ? round() : last;
+    if (attempt === attempts) return last;
     await sleep(delayMs);
   }
   return last;

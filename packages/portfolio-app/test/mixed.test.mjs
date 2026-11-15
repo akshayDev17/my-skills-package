@@ -104,6 +104,10 @@ test("mixed, fresh apply: Allow then Bypass, waits for both answers, then D1 and
     `GET https://${DOMAIN}/time-track/api/portfolio-app-verify`,
     `GET https://${DOMAIN}/time-track`,
     `GET https://${DOMAIN}/time-track/_next/portfolio-app-verify`,
+    `GET https://${DOMAIN}/time-track/portfolio-app-verify`,
+    `GET https://${DOMAIN}/time-track/api/portfolio-app-verify`,
+    `GET https://${DOMAIN}/time-track`,
+    `GET https://${DOMAIN}/time-track/_next/portfolio-app-verify`,
     "POST /d1/database",
   ]);
   const [allowPolicy, bypassPolicy] = world.site.policies;
@@ -327,6 +331,35 @@ test("mixed apply stops before D1 and GitHub when the children of an exact publi
   assert.deepEqual(world.site.d1, [], "no D1 database");
   assert.deepEqual(world.local.github, { environment: false, secrets: [] }, "GitHub untouched");
   assert.equal(readFileSync(join(cloneDir, "backend", "wrangler.jsonc"), "utf8"), WRANGLER_WITH_PLACEHOLDER);
+});
+
+test("mixed apply stops when the Bypass app goes live after a round's private probes were answered", async () => {
+  const world = graphNotesWorld();
+  world.site.inheritExact = true;
+  const h = harness(world);
+  const opts = gnOpts(makeClone(WRANGLER_GN_DONE));
+  const actions = await planBootstrap(h.deps, opts);
+  const planCalls = h.http.calls.length;
+  let bypassLive = false;
+  const probed = [];
+  const propagating = async (url, init) => {
+    const u = new URL(url);
+    if (u.hostname === "api.cloudflare.com") return h.http.fetch(url, init);
+    probed.push(u.pathname);
+    if (u.pathname === "/graph/public") bypassLive = true;
+    return bypassLive ? h.http.fetch(url, init) : { status: 302, headers: new Map([["location", ACCESS_LOGIN]]) };
+  };
+  await assert.rejects(applyBootstrap({ ...h.deps, fetch: propagating }, actions, opts), (err) => {
+    assert.match(err.message, /^Access is not answering for \/graph: /);
+    assert.ok(err.message.includes(`https://${DOMAIN}/graph/public/portfolio-app-verify answered 200 — not behind Access`), err.message);
+    return true;
+  });
+  assert.equal(probed.indexOf("/graph/public/portfolio-app-verify") < probed.indexOf("/graph/public"), true,
+    "the child was first answered before the Bypass app was live");
+  assert.equal(probed.filter((p) => p === "/graph/public/portfolio-app-verify").length, 2, "and asked again once it was");
+  assert.ok(!h.logs.some((l) => l.includes("answer signed out")), "no success line");
+  assert.deepEqual(api(writes(h.http.calls.slice(planCalls))), ["POST /access/policies", "POST /access/apps"]);
+  assert.deepEqual(world.site.apps[0], ALLOW_APP, "the Allow app is untouched");
 });
 
 test("mixed apply passes under inheritance when the only exact public path is the prefix, whose children the Allow app's /* answers", async () => {

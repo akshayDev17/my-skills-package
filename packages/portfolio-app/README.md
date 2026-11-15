@@ -110,6 +110,9 @@ The Cloudflare Access step, in apply order:
    before D1 or GitHub if that never happens. The private probes include a child of each public
    path listed without a `/*`, so a run whose exact public paths turn out to open their
    children stops here, with both Access apps already created; nothing is removed for you.
+   The two apps start answering at different moments, so the first round in which every probe
+   passes may hold private answers taken before the Bypass app was live. That round is run
+   again at once, and the second run decides.
 
 D1 and GitHub follow as for a private app. Each step only fills in what is missing, so a mixed
 run on an app that already has its Allow app, D1 and secrets creates only the Bypass policy and
@@ -117,9 +120,12 @@ app.
 
 **Which app answers which path.** When several Access apps match a request, the one with the
 most specific matching destination applies, and within one app Bypass policies are evaluated
-before Allow. The Bypass app's destinations all sit under the prefix, so they are more specific
-than the Allow app's `<prefix>/*` and win for the listed paths; everything else under the prefix
-still goes to the Allow app. The plan prints this per destination:
+before Allow. A listed destination under the prefix is more specific than the Allow app's
+`<prefix>/*`, so the Bypass app wins there; a public `/<prefix>` is left out of the Allow app, so
+only the Bypass app holds it. Everything else under the prefix is expected to go to the Allow
+app. That is not certain for the paths under a public path listed without `/*`, which may
+inherit its Bypass (see the research notes), so a child of each one is probed and must still ask
+for sign-in. The plan prints the intended answer per destination:
 
 ```
   · who answers (the app with the most specific matching destination wins; Bypass lets anyone in, Allow asks for sign-in):

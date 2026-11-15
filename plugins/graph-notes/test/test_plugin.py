@@ -96,12 +96,16 @@ def plugin_command(data: Path) -> tuple[str, list[str], dict[str, str]]:
 
 def test_mcp_json_names_only_the_bundled_server(tmp_path):
     command, args, env = plugin_command(tmp_path)
-    raw = (PLUGIN / ".mcp.json").read_text()
     assert command == "uv" and "graph-notes-mcp" in args
-    assert "${CLAUDE_PLUGIN_ROOT}/server" in raw
     # The environment lives in the data directory, which survives updates; the plugin root does not.
     assert env == {"UV_PROJECT_ENVIRONMENT": f"{tmp_path}/venv"}
-    assert "graph-notes/mcp-server" not in raw and "/Users/" not in raw and "/home/" not in raw
+
+    servers = json.loads((PLUGIN / ".mcp.json").read_text())["mcpServers"]
+    assert set(servers) == {"graph-notes"}
+    unexpanded = servers["graph-notes"]
+    assert unexpanded["args"][unexpanded["args"].index("--project") + 1] == "${CLAUDE_PLUGIN_ROOT}/server"
+    values = [unexpanded["command"], *unexpanded["args"], *unexpanded.get("env", {}).values()]
+    assert not [v for v in values if Path(v).is_absolute() or "graph-notes/mcp-server" in v], values
 
 
 def test_the_plugin_command_serves_the_graph_tools(app, tmp_path):

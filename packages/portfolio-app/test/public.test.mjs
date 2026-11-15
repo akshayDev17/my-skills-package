@@ -290,9 +290,32 @@ test("public apply stops before deleting anything or touching GitHub when the Wo
   const h = harness(world);
   const actions = await planBootstrap(h.deps, opts(cloneDir));
   await assert.rejects(applyBootstrap(h.deps, actions, opts(cloneDir)),
-    /the Worker route example\.com\/work\/election-atlas\* does not answer as it should: https:\/\/example\.com\/work\/election-atlasportfolio-app-verify answered 200 without x-github-request-id — .*fetch\(req\)\. Nothing was deleted: example\.com\/work\/election-atlas \+ example\.com\/work\/election-atlas\/\* still point at the same Worker/);
+    /the Worker route example\.com\/work\/election-atlas\* does not answer as it should: https:\/\/example\.com\/work\/election-atlasportfolio-app-verify answered 200 without x-github-request-id — .*fetch\(req\)\. example\.com\/work\/election-atlas\* was created by this run and is kept live; nothing was deleted: example\.com\/work\/election-atlas \+ example\.com\/work\/election-atlas\/\* still point at the same Worker/);
   assert.deepEqual(world.site.routes.map((r) => r.pattern), [`${DOMAIN}/*`, ROUTES[0], ROUTES[1], ROUTE]);
   assert.equal(world.local.github.environment, false, "GitHub is not touched");
+});
+
+test("public apply re-run after a failed route check checks again and still stops before GitHub", async () => {
+  const world = deployedWorld();
+  delete world.site.workerPrefixes; // a new app whose Worker has no pass-through guard
+  const cloneDir = makeClone(WRANGLER_PUBLIC);
+  const h = harness(world);
+  await assert.rejects(applyBootstrap(h.deps, await planBootstrap(h.deps, opts(cloneDir)), opts(cloneDir)),
+    /election-atlas\* was created by this run and is kept live$/);
+  assert.equal(world.local.github.environment, false);
+
+  const rerun = harness(world);
+  const actions = await planBootstrap(rerun.deps, opts(cloneDir));
+  assert.ok(!actions.some((a) => a.step === "route" && a.state === "create"), "the route is already there");
+  await assert.rejects(applyBootstrap(rerun.deps, actions, opts(cloneDir)),
+    /does not answer as it should: .*election-atlasportfolio-app-verify .*\. example\.com\/work\/election-atlas\* is still in place$/);
+  assert.equal(world.local.github.environment, false, "GitHub is still not touched");
+
+  world.site.workerPrefixes = { "election-atlas": PREFIX }; // the Worker now passes outside paths on
+  const fixed = harness(world);
+  await applyBootstrap(fixed.deps, await planBootstrap(fixed.deps, opts(cloneDir)), opts(cloneDir));
+  assert.deepEqual(siteProbes(fixed.http.calls).slice(-3), ROUTE_PROBES, "the re-run probes the route before GitHub");
+  assert.equal(world.local.github.environment, true);
 });
 
 test("public apply keeps checking while the new route is not answering yet, then goes on", async () => {
@@ -373,24 +396,4 @@ test("cli keeps every prefix refusal in public mode", async () => {
     assert.equal(r.code, 2, path);
     assert.deepEqual(r.http.calls, [], path);
   }
-});
-
-test("cli verify --routes: exits 0 for <prefix>* with the pass-through, 1 for the old exact pair, and needs no token", async () => {
-  const good = deployedWorld();
-  good.site.routes = [{ id: "r1", pattern: ROUTE, script: "election-atlas" }];
-  const pass = await cli(good, ["verify", "--routes", "--path", PREFIX, "--domain", DOMAIN]);
-  assert.equal(pass.code, 0, pass.out);
-  assert.match(pass.out, /✓ https:\/\/example\.com\/work\/election-atlas\?portfolio-app-verify=1 answered 200, as \/work\/election-atlas does/);
-  assert.match(pass.out, /✓ https:\/\/example\.com\/work\/election-atlasportfolio-app-verify answered 404 from the origin, as a path outside \/work\/election-atlas should/);
-  assert.deepEqual(pass.proc.calls, [], "no keychain, git or gh");
-  assert.ok(pass.http.calls.every((c) => !c.url.startsWith("https://api.cloudflare.com/")), "no API call");
-
-  const old = deployedWorld();
-  old.site.routes = [{ id: "r1", pattern: ROUTES[0], script: "election-atlas" }, { id: "r2", pattern: ROUTES[1], script: "election-atlas" }];
-  const fail = await cli(old, ["verify", "--routes", "--path", PREFIX, "--domain", DOMAIN]);
-  assert.equal(fail.code, 1);
-  assert.match(fail.out, /✗ https:\/\/example\.com\/work\/election-atlas\?portfolio-app-verify=1 answered 200 from the origin .* misses \/work\/election-atlas\?<query>/);
-
-  const mixed = await cli(good, ["verify", "--routes", "--path", PREFIX, "--domain", DOMAIN, "--public-path", PREFIX]);
-  assert.equal(mixed.code, 2);
 });

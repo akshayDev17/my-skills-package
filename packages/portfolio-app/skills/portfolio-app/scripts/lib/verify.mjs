@@ -141,7 +141,9 @@ export async function waitForAccess({ fetch, domain, prefix, team, publicPaths =
 // a query string sends the request on to the origin; and `/<prefix>portfolio-app-verify`,
 // which `<prefix>*` also matches, must still come from the origin, because the app's Worker
 // hands every path outside its prefix back with `fetch(req)`. The site's origin is GitHub
-// Pages, which marks every answer with an `x-github-request-id` header.
+// Pages, which marks every answer with an `x-github-request-id` header. An Access login
+// redirect on `/<prefix>` or the query probe fails the check: Access answers before any
+// Worker route is considered, so signed out nothing about the route can be told.
 
 const ORIGIN_HEADER = "x-github-request-id";
 const QUERY_PROBE = "portfolio-app-verify=1";
@@ -160,6 +162,15 @@ async function probe(fetch, url) {
     return { status: res.status, location: res.headers.get("location"), origin: res.headers.get(ORIGIN_HEADER) != null };
   } catch (err) {
     return { status: null, error: err.message };
+  }
+}
+
+function redirectsToAccess(answer, url) {
+  if (answer.status < 300 || answer.status >= 400 || !answer.location) return false;
+  try {
+    return new URL(answer.location, url).hostname.endsWith(".cloudflareaccess.com");
+  } catch {
+    return false;
   }
 }
 
@@ -188,6 +199,7 @@ export async function checkRoutes({ fetch, domain, prefix }) {
   if (query.status === null) queryResult = failed(urls.query, query);
   else if (query.origin) queryResult = failed(urls.query, query, `answered ${query.status} from the origin (${ORIGIN_HEADER}) — the Worker route misses ${prefix}?<query>`);
   else if (bare.status === null || bare.origin) queryResult = failed(urls.query, query, `${prefix} itself answered ${bare.status ?? "nothing"}${bare.origin ? " from the origin" : ""}, so there is no app answer to compare with`);
+  else if (redirectsToAccess(bare, urls.bare) || redirectsToAccess(query, urls.query)) queryResult = failed(urls.query, query, `Cloudflare Access answered (${redirectsToAccess(bare, urls.bare) ? prefix : "the query"} redirects to its login) before any Worker route, so the route cannot be checked signed out`);
   else if (query.status === bare.status) queryResult = passed(urls.query, query, `answered ${query.status}, as ${prefix} does`);
   else if (redirectsIntoPrefix(query, urls.query, prefix)) queryResult = passed(urls.query, query, `${query.status} → ${new URL(query.location, urls.query).pathname}, inside ${prefix}`);
   else queryResult = failed(urls.query, query, `answered ${query.status}, but ${prefix} answers ${bare.status}`);

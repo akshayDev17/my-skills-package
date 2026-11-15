@@ -2,7 +2,7 @@
 // portfolio-app — set up a new sub-app of the site, and check that it is behind Access.
 //
 //   portfolio-app bootstrap --repo <owner/name> --path /<prefix> [--public | --public-path <path>…] [--d1 <name>] [--clone <dir>] [--apply]
-//   portfolio-app verify --path /<prefix> [--public-path <path>…] [--routes] [--domain <host>] [--team <team>]
+//   portfolio-app verify --path /<prefix> [--public-path <path>…] [--domain <host>] [--team <team>]
 //
 // This file only wires the real world (fetch, child processes, the filesystem) into the
 // library under ./lib, where every function takes its dependencies as arguments.
@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
 import { normalizePrefix, normalizePublicPath } from "./lib/prefix.mjs";
-import { checkRoutes, verifyPath } from "./lib/verify.mjs";
+import { verifyPath } from "./lib/verify.mjs";
 import { applyBootstrap, formatPlan, planBootstrap } from "./lib/bootstrap.mjs";
 import { SETUP_TOKEN_ACCOUNT, defaultConfigPath, isInsideGitWorkTree, keychainRead, parseConfig } from "./lib/local.mjs";
 
@@ -37,15 +37,11 @@ const USAGE = `usage:
       checked. A newly listed path is added to an existing "<repo name> (public)". If
       the check fails after the run added /<prefix>/, apply takes that one destination
       out again; nothing else is removed.
-  portfolio-app verify --path /<prefix> [--public-path <path>…] [--routes] [--domain <host>]
-                       [--team <team>] [--config <file>]
+  portfolio-app verify --path /<prefix> [--public-path <path>…] [--domain <host>] [--team <team>]
+                       [--config <file>]
       Exits 0 only when the path redirects to Cloudflare Access (with --public-path:
       the private paths, a child of each exact public path among them, redirect and
-      every listed public path answers signed out). --routes checks the Worker route
-      instead: /<prefix>?portfolio-app-verify=1 answers as /<prefix> does (or redirects
-      into the prefix), not from the origin, and /<prefix>portfolio-app-verify still
-      comes from the origin; with --routes alone the Access check is skipped, so it
-      also works for a public app.
+      every listed public path answers signed out).
       Needs no token.
 
 exit codes: 0 ok · 1 verify failed or a step failed · 2 usage error or plan conflict`;
@@ -101,14 +97,6 @@ async function verifyCommand(values, { fetch, run, log }) {
     domain = config.domain;
     team ??= config.team;
   }
-  if (values.routes) {
-    if (publicPaths.length > 0) throw new UsageError("--routes checks the Worker route only; run it without --public-path");
-    const { ok, results } = await checkRoutes({ fetch, domain, prefix });
-    for (const r of results) log(`${r.ok ? "✓" : "✗"} ${r.url} ${r.reason}`);
-    log(ok ? `${domain}${prefix}* reaches the app with a query and passes other paths to the origin`
-      : `${domain}${prefix}'s Worker route is NOT right — refusing`);
-    return ok ? 0 : 1;
-  }
   const { ok, results } = await verifyPath({ fetch, domain, prefix, team, publicPaths });
   for (const r of results) log(`${r.ok ? "✓" : "✗"} ${r.url} ${r.reason}`);
   if (publicPaths.length > 0) {
@@ -155,7 +143,6 @@ export async function main(argv, deps) {
         d1: { type: "string" },
         public: { type: "boolean", default: false },
         "public-path": { type: "string", multiple: true },
-        routes: { type: "boolean", default: false },
         clone: { type: "string" },
         config: { type: "string" },
         domain: { type: "string" },

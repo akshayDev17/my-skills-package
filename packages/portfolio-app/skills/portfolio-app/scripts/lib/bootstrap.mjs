@@ -426,7 +426,7 @@ async function planRoutes({ cf }, { prefix, config }, clone) {
     const target = route.script ? `Worker "${route.script}"` : "no Worker";
     if (relation === "exact" && ours) {
       present = true;
-      actions.push(action("ok", `route ${route.pattern} → ${target}`));
+      actions.push(action("ok", `route ${route.pattern} → ${target}`, { ownRoute: true }));
     } else if (relation === "pair" && ours) {
       replaced.push(route);
     } else if (relation === "inside" && ours) {
@@ -454,31 +454,36 @@ async function planRoutes({ cf }, { prefix, config }, clone) {
       { later: true })];
   }
   return [...actions,
-    action("create", `create route ${pattern} → Worker "${script}" (publicly reachable; the Worker must pass paths outside ${prefix} to the origin)`, { pattern, script, zoneId }),
+    action("create", `create route ${pattern} → Worker "${script}" (publicly reachable; the Worker must pass paths outside ${prefix} to the origin)`, { pattern, script, zoneId, ownRoute: true }),
     ...replacements];
 }
 
 /**
- * The route actions of a public plan: creates `<prefix>*`, then waits until the route
- * check passes (`/<prefix>?<query>` reaches the app, `/<prefix><sibling>` the origin), and
- * only then deletes the old routes it replaces. A failed check deletes nothing: the old
- * routes still point at the same Worker, so the app keeps answering where it did.
+ * The route actions of a public plan whose `<prefix>*` exists or is planned: creates it if
+ * planned, then waits until the route check passes (`/<prefix>?<query>` reaches the app,
+ * `/<prefix><sibling>` the origin), and only then deletes the old routes it replaces. The
+ * check runs on every apply, so a re-run after a failed one cannot pass without it. A failed
+ * check deletes nothing and keeps `<prefix>*`: the old routes still point at the same
+ * Worker, so the app keeps answering where it did.
  */
 async function applyRoutes({ cf, fetch, sleep, log }, routeActions, { prefix, config }) {
-  for (const action of routeActions.filter((a) => a.kind === "route")) {
+  const route = workerRoute(config.domain, prefix);
+  const creates = routeActions.filter((a) => a.state === "create");
+  for (const action of creates) {
     await createWorkerRoute(cf, action.zoneId, { pattern: action.pattern, script: action.script });
     log(`  + created route ${action.pattern} → Worker "${action.script}"`);
   }
   const check = await waitForRoutes({ fetch, domain: config.domain, prefix, sleep });
   const failures = check.results.filter((r) => !r.ok).map((r) => `${r.url} ${r.reason}`).join("; ");
-  const deletes = routeActions.filter((a) => a.kind === "route-delete");
+  const deletes = routeActions.filter((a) => a.state === "delete");
   if (!check.ok) {
-    throw new Error(`the Worker route ${workerRoute(config.domain, prefix)} does not answer as it should: ${failures}${deletes.length > 0 ? `. Nothing was deleted: ${deletes.map((a) => a.pattern).join(" + ")} still point at the same Worker` : ""}`);
+    const kept = creates.length > 0 ? `${route} was created by this run and is kept live` : `${route} is still in place`;
+    throw new Error(`the Worker route ${route} does not answer as it should: ${failures}. ${kept}${deletes.length > 0 ? `; nothing was deleted: ${deletes.map((a) => a.pattern).join(" + ")} still point at the same Worker` : ""}`);
   }
   log(`  ✓ ${prefix}?<query> reaches the app, and ${prefix}portfolio-app-verify the origin`);
   for (const action of deletes) {
     await deleteWorkerRoute(cf, action.zoneId, action.routeId);
-    log(`  - deleted route ${action.pattern}, replaced by ${workerRoute(config.domain, prefix)}`);
+    log(`  - deleted route ${action.pattern}, replaced by ${route}`);
   }
 }
 
@@ -709,8 +714,8 @@ export async function applyBootstrap({ cf, run, fetch, sleep, log }, actions, { 
       log(`  + created R2 bucket "${action.name}"`);
     }
   }
-  const routeActions = actions.filter((a) => a.step === "route" && (a.state === "create" || a.state === "delete"));
-  if (routeActions.length > 0) await applyRoutes({ cf, fetch, sleep, log }, routeActions, { prefix, config });
+  const routeActions = actions.filter((a) => a.step === "route");
+  if (routeActions.some((a) => a.ownRoute)) await applyRoutes({ cf, fetch, sleep, log }, routeActions, { prefix, config });
   for (const action of creates("github")) {
     if (action.kind === "gh-environment") {
       ghCreateEnvironment(run, repo);

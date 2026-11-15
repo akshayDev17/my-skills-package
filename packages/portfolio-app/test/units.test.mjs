@@ -371,4 +371,9 @@ test("checkRoutes: /<prefix>?<query> must answer like /<prefix> (or redirect int
 
   const unrouted = await run({ "/graph": { status: 404, origin: true } });
   assert.equal(unrouted.ok, false);
+
+  const login = { status: 302, location: "https://team.cloudflareaccess.com/cdn-cgi/access/login/example.com" };
+  const behindAccess = await run({ ...app, "/graph": login, "/graph?portfolio-app-verify=1": login });
+  assert.equal(behindAccess.ok, false, "the same Access redirect on both is no proof the route matches the query");
+  assert.match(behindAccess.results[0].reason, /Cloudflare Access answered .* cannot be checked signed out/);
 });

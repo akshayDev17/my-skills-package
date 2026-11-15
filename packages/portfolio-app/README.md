@@ -59,8 +59,16 @@ says the two destinations will be reachable by anyone. The steps, in apply order
    [The Worker route and its pass-through](#the-worker-route-and-its-pass-through)). A route
    can only name a deployed Worker (see the research notes), so before the first deploy the
    plan says so and creates nothing here; re-run after that deploy to add the route. With
-   `--apply`, once the route exists, it waits until the route check passes (`verify --routes`,
-   below), and stops before GitHub, deleting nothing, if it never does. An app bootstrapped
+   `--apply`, whenever the route exists or this run creates it, it waits until the route check
+   passes, and stops before GitHub, deleting nothing, if it never does (a route this run created
+   stays in place). The check, signed out: `/<prefix>?portfolio-app-verify=1` must answer with
+   the status `/<prefix>` answers with, or redirect to `/<prefix>` or a path under `/<prefix>/`
+   on the same host, with neither answer from the origin nor a redirect to an Access login; and
+   `/<prefix>portfolio-app-verify` must come from the origin. "From the origin" means the answer
+   carries GitHub Pages' `x-github-request-id` header. A query probe from the origin means the
+   Worker route misses `/<prefix>?<query>`; a sibling probe without the header means the Worker
+   serves paths outside its prefix; an Access login redirect means nothing about the route can
+   be told signed out. An app bootstrapped
    before this change holds that same Worker's exact pair `<domain>/<prefix>` +
    `<domain>/<prefix>/*`: the plan shows each as a `-` line, and apply deletes them only after
    `<domain>/<prefix>*` exists and the check passes. Both point at the same Worker, so the app
@@ -377,12 +385,14 @@ if (!ours) return fetch(req);                     // /graphfoo etc.: the origin,
 Then `/<prefix>?<query>` reaches the app. Whether it serves that in place or redirects to
 `/<prefix>/?<query>` (keeping the query) is the app's choice: redirect only when `/<prefix>` and
 `/<prefix>/` have the same Access (both signed in or both public) and the app's canonical URL
-has the trailing slash; otherwise serve in place. For a mixed app with `--public-path /<prefix>`
-but not `/<prefix>/`, serve in place:
+has the trailing slash; otherwise serve in place (so a mixed app with `--public-path /<prefix>`
+but not `/<prefix>/` serves in place). To redirect, test the request's own path: after the
+rewrite above, `u.pathname` is `/` for both `/graph` and `/graph/`:
 
 ```js
-if (u.pathname === '/graph' && u.search) {
-  return new Response(null, { status: 308, headers: { location: `/graph/${u.search}` } });
+const { pathname, search } = new URL(req.url);
+if (pathname === '/graph' && search) {
+  return new Response(null, { status: 308, headers: { location: `/graph/${search}` } });
 }
 ```
 
@@ -397,7 +407,6 @@ links to.
 
 ```sh
 portfolio-app verify --path /<prefix> --domain <host> [--team <team>] [--public-path <path>…]
-portfolio-app verify --routes --path /<prefix> --domain <host>
 ```
 
 Requests `https://<host>/<prefix>` and `https://<host>/<prefix>/portfolio-app-verify` without
@@ -436,17 +445,6 @@ their narrowing destinations. For time-track, the child of the public `/time-tra
 `/time-track/portfolio-app-verify` and `/time-track/api/portfolio-app-verify` as private, then
 `/time-track`, `/time-track/_next/portfolio-app-verify` and `/time-track/` as public. Without
 `--public-path`, `verify` behaves exactly as before.
-
-**`--routes`** checks the app's Worker route instead of Access, so it works for a public app
-too (and for a private one only shows what a signed-out visitor gets). It exits `0` only when
-`/<prefix>?portfolio-app-verify=1` answers with the status `/<prefix>` answers with, or
-redirects to `/<prefix>` or a path under `/<prefix>/` on the same host, and neither answer
-comes from the origin; and `/<prefix>portfolio-app-verify` does come from the origin. "From the
-origin" means the answer carries GitHub Pages' `x-github-request-id` header: the site's origin
-is GitHub Pages. A query probe from the origin means the Worker route misses
-`/<prefix>?<query>` (the exact `<domain>/<prefix>` route); a sibling probe without the header
-means the Worker serves paths outside its prefix. `bootstrap --public --apply` runs this check
-after creating the route. It is not combined with `--public-path`.
 
 **Limit:** a public path that answers a bare `401` or `403` fails the check. Access can answer
 that way, and so can Cloudflare's bot protection when it refuses an automated client; from a

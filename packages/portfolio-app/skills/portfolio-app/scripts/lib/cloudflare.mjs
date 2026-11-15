@@ -66,10 +66,6 @@ export const listAccessApps = (cf) => cfListAll(cf, `/accounts/${cf.accountId}/a
 
 export const pickReusablePolicy = (policies, name) => policies.find((p) => p.name === name && p.reusable !== false) ?? null;
 
-export async function findReusablePolicy(cf, name) {
-  return pickReusablePolicy(await listAccessPolicies(cf), name);
-}
-
 /** `include` is a list of Access rules, such as `{ email: { email } }` or `{ everyone: {} }`. */
 export async function createReusablePolicy(cf, { name, decision, include }) {
   const json = await cfRequest(cf, "POST", `/accounts/${cf.accountId}/access/policies`, { name, decision, include });

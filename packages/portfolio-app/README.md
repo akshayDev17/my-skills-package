@@ -148,8 +148,9 @@ The Cloudflare Access step, in apply order:
 4. **Wait for both answers.** With `--apply`, it waits until every private probe redirects to
    the Access login and every public path answers signed out (see `verify` below), and stops
    before D1 or GitHub if that never happens. The private probes include a child of each public
-   path listed without a `/*`, so a run whose exact public paths turn out to open their
-   children stops here, with both Access apps already created; nothing is removed for you.
+   path listed without a `/*`, so a run whose exact public paths open their children despite
+   the narrowing destinations stops here, with both Access apps already in place; nothing is
+   removed for you.
    The two apps start answering at different moments, so the first round in which every probe
    passes may hold private answers taken before the Bypass app was live. That round is run
    again at once, and apply goes on only when the second run passes too. If the second run

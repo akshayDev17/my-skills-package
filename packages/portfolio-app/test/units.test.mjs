@@ -2,9 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   accessDestinations, allowDestinations, classifyRoute, narrowingDestinations, normalizePrefix, normalizePublicPath, pathCovers,
-  privateDestinations, publicDestinations,
+  privateDestinations, publicDestinations, workerRoute,
 } from "../skills/portfolio-app/scripts/lib/prefix.mjs";
-import { checkAccessRedirect, checkSignedOutAnswer, mixedProbes, verifyPath, waitForAccess } from "../skills/portfolio-app/scripts/lib/verify.mjs";
+import { checkAccessRedirect, checkRoutes, checkSignedOutAnswer, mixedProbes, verifyPath, waitForAccess } from "../skills/portfolio-app/scripts/lib/verify.mjs";
 import { appPolicies, isBypassEveryone, withAddedDestinations, withoutDestination } from "../skills/portfolio-app/scripts/lib/cloudflare.mjs";
 import { D1_PLACEHOLDER, d1Target, parseJsonc, r2Target, replacePlaceholder } from "../skills/portfolio-app/scripts/lib/wrangler-config.mjs";
 import { parseConfig, repoFromRemote } from "../skills/portfolio-app/scripts/lib/local.mjs";
@@ -123,17 +123,22 @@ test("repoFromRemote reads https and ssh GitHub remotes", () => {
 
 test("classifyRoute places a route relative to the app's prefix", () => {
   const at = (pattern) => classifyRoute(pattern, "example.com", "/work/election-atlas");
-  assert.equal(at("example.com/work/election-atlas"), "exact");
-  assert.equal(at("example.com/work/election-atlas/*"), "exact");
-  assert.equal(at("https://example.com/work/election-atlas/*"), "exact");
+  assert.equal(at("example.com/work/election-atlas*"), "exact", "the app's own route");
+  assert.equal(at("https://example.com/work/election-atlas*"), "exact");
+  assert.equal(at("example.com/work/election-atlas"), "pair", "the old exact route <prefix>* replaces");
+  assert.equal(at("example.com/work/election-atlas/*"), "pair");
+  assert.equal(at("https://example.com/work/election-atlas/*"), "pair");
   assert.equal(at("example.com/work/election-atlas/api/*"), "inside");
   assert.equal(at("example.com/work/election-atlas/data.json"), "inside");
   assert.equal(at("*example.com/work/election-atlas/*"), "inside", "a wildcard host is never the app's own pattern");
   assert.equal(at("example.com/*"), "broader");
   assert.equal(at("*example.com/*"), "broader");
   assert.equal(at("example.com/work/*"), "broader");
-  assert.equal(at("example.com/work/election-atlas*"), "straddles");
-  assert.equal(at("example.com/work/election-atlas-old/*"), null);
+  assert.equal(at("*example.com/work/election-atlas*"), "straddles", "a wildcard host is never the app's own pattern");
+  assert.equal(at("example.com/work/election*"), "broader", "shorter than the app's own route, which wins under the prefix");
+  assert.equal(at("example.com/work/election-atlas-old/*"), "sibling");
+  assert.equal(at("example.com/work/election-atlasfoo"), "sibling");
+  assert.equal(at("example.com/work/election-atlas-x*"), "sibling");
   assert.equal(at("example.com/work"), null);
   assert.equal(at("example.com/quiz/*"), null);
   assert.equal(at("*.example.com/*"), null, "a subdomain wildcard does not cover the apex");
@@ -321,4 +326,49 @@ test("isBypassEveryone and appPolicies read policies inline or by id", () => {
   assert.deepEqual(appPolicies({ policies: [{ id: "p1", precedence: 1 }] }, [everyone]), [everyone]);
   assert.deepEqual(appPolicies({ policies: [{ ...everyone, precedence: 1 }] }, []), [{ ...everyone, precedence: 1 }]);
   assert.deepEqual(appPolicies({}, [everyone]), []);
+});
+
+test("workerRoute is the one pattern <domain><prefix>*, which matches /<prefix>?<query>", () => {
+  assert.equal(workerRoute("example.com", "/graph"), "example.com/graph*");
+  assert.equal(workerRoute("example.com", "/work/election-atlas"), "example.com/work/election-atlas*");
+  assert.deepEqual(accessDestinations("example.com", "/graph"), ["example.com/graph", "example.com/graph/*"], "Access is not widened with it");
+});
+
+/** A fetch answering each probe path (pathname + search) from `answers`; the origin marks its answers. */
+function stubSite(answers) {
+  return async (url) => {
+    const u = new URL(url);
+    const a = answers[`${u.pathname}${u.search}`] ?? { status: 404, origin: true };
+    const headers = new Map([...(a.location ? [["location", a.location]] : []), ...(a.origin ? [["x-github-request-id", "X"]] : [])]);
+    return { status: a.status, headers };
+  };
+}
+
+test("checkRoutes: /<prefix>?<query> must answer like /<prefix> (or redirect into it), the sibling from the origin", async () => {
+  const run = (answers) => checkRoutes({ fetch: stubSite(answers), domain: "example.com", prefix: "/graph" });
+  const app = { "/graph": { status: 200 }, "/graphportfolio-app-verify": { status: 404, origin: true } };
+
+  const served = await run({ ...app, "/graph?portfolio-app-verify=1": { status: 200 } });
+  assert.equal(served.ok, true, JSON.stringify(served.results));
+  assert.deepEqual(served.results.map((r) => r.url), [
+    "https://example.com/graph?portfolio-app-verify=1", "https://example.com/graphportfolio-app-verify",
+  ]);
+
+  const redirected = await run({ ...app, "/graph?portfolio-app-verify=1": { status: 308, location: "/graph/?portfolio-app-verify=1" } });
+  assert.equal(redirected.ok, true);
+  assert.match(redirected.results[0].reason, /308 → \/graph\/, inside \/graph/);
+
+  const missed = await run(app);
+  assert.equal(missed.ok, false);
+  assert.match(missed.results[0].reason, /from the origin .* the Worker route misses \/graph\?<query>/);
+
+  const elsewhere = await run({ ...app, "/graph?portfolio-app-verify=1": { status: 308, location: "/graphs/" } });
+  assert.equal(elsewhere.ok, false, "a redirect outside the prefix is not the app's answer");
+
+  const caught = await run({ ...app, "/graph?portfolio-app-verify=1": { status: 200 }, "/graphportfolio-app-verify": { status: 200 } });
+  assert.equal(caught.ok, false);
+  assert.match(caught.results[1].reason, /serves a path outside \/graph instead of passing it to the origin with fetch\(req\)/);
+
+  const unrouted = await run({ "/graph": { status: 404, origin: true } });
+  assert.equal(unrouted.ok, false);
 });

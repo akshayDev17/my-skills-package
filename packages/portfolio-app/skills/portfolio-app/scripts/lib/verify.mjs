@@ -132,3 +132,81 @@ export async function waitForAccess({ fetch, domain, prefix, team, publicPaths =
   }
   return last;
 }
+
+// --- The Worker route check ------------------------------------------------------------
+//
+// An app's Worker route is `<domain><prefix>*` (see `workerRoute` in prefix.mjs). Two
+// probes show it works: `/<prefix>?portfolio-app-verify=1` must answer as `/<prefix>` does
+// (or redirect into the prefix), never from the zone's origin, because a route that misses
+// a query string sends the request on to the origin; and `/<prefix>portfolio-app-verify`,
+// which `<prefix>*` also matches, must still come from the origin, because the app's Worker
+// hands every path outside its prefix back with `fetch(req)`. The site's origin is GitHub
+// Pages, which marks every answer with an `x-github-request-id` header.
+
+const ORIGIN_HEADER = "x-github-request-id";
+const QUERY_PROBE = "portfolio-app-verify=1";
+
+export function routeProbeUrls(domain, prefix) {
+  return {
+    bare: `https://${domain}${prefix}`,
+    query: `https://${domain}${prefix}?${QUERY_PROBE}`,
+    sibling: `https://${domain}${prefix}${PROBE_SUBPATH}`,
+  };
+}
+
+async function probe(fetch, url) {
+  try {
+    const res = await fetch(url, { method: "GET", redirect: "manual" });
+    return { status: res.status, location: res.headers.get("location"), origin: res.headers.get(ORIGIN_HEADER) != null };
+  } catch (err) {
+    return { status: null, error: err.message };
+  }
+}
+
+/** Whether a redirect from `url` lands on `/<prefix>` or under `/<prefix>/`, on the same host. */
+function redirectsIntoPrefix(answer, url, prefix) {
+  if (answer.status < 300 || answer.status >= 400 || !answer.location) return false;
+  let target;
+  try {
+    target = new URL(answer.location, url);
+  } catch {
+    return false;
+  }
+  return target.host === new URL(url).host && (target.pathname === prefix || target.pathname.startsWith(`${prefix}/`));
+}
+
+/** The two route probes as `{ url, ok, status, reason }` results; `ok` when both pass. */
+export async function checkRoutes({ fetch, domain, prefix }) {
+  const urls = routeProbeUrls(domain, prefix);
+  const bare = await probe(fetch, urls.bare);
+  const query = await probe(fetch, urls.query);
+  const sibling = await probe(fetch, urls.sibling);
+  const failed = (url, answer, why) => ({ url, ok: false, status: answer.status, reason: answer.error ? `request failed: ${answer.error}` : why });
+  const passed = (url, answer, why) => ({ url, ok: true, status: answer.status, reason: why });
+
+  let queryResult;
+  if (query.status === null) queryResult = failed(urls.query, query);
+  else if (query.origin) queryResult = failed(urls.query, query, `answered ${query.status} from the origin (${ORIGIN_HEADER}) — the Worker route misses ${prefix}?<query>`);
+  else if (bare.status === null || bare.origin) queryResult = failed(urls.query, query, `${prefix} itself answered ${bare.status ?? "nothing"}${bare.origin ? " from the origin" : ""}, so there is no app answer to compare with`);
+  else if (query.status === bare.status) queryResult = passed(urls.query, query, `answered ${query.status}, as ${prefix} does`);
+  else if (redirectsIntoPrefix(query, urls.query, prefix)) queryResult = passed(urls.query, query, `${query.status} → ${new URL(query.location, urls.query).pathname}, inside ${prefix}`);
+  else queryResult = failed(urls.query, query, `answered ${query.status}, but ${prefix} answers ${bare.status}`);
+
+  const siblingResult = sibling.status === null ? failed(urls.sibling, sibling)
+    : sibling.origin ? passed(urls.sibling, sibling, `answered ${sibling.status} from the origin, as a path outside ${prefix} should`)
+    : failed(urls.sibling, sibling, `answered ${sibling.status} without ${ORIGIN_HEADER} — the Worker on ${prefix}* serves a path outside ${prefix} instead of passing it to the origin with fetch(req)`);
+
+  const results = [queryResult, siblingResult];
+  return { ok: results.every((r) => r.ok), results };
+}
+
+/** A new route takes a moment to reach the edge: polls `checkRoutes` like `waitForAccess`. */
+export async function waitForRoutes({ fetch, domain, prefix, attempts = 12, delayMs = 5000, sleep }) {
+  let last;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    last = await checkRoutes({ fetch, domain, prefix });
+    if (last.ok || attempt === attempts) return last;
+    await sleep(delayMs);
+  }
+  return last;
+}

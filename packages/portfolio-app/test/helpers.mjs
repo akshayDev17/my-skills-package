@@ -28,6 +28,44 @@ const jsonResponse = (status, body) => ({
 
 const redirect = (location) => ({ ok: false, status: 302, headers: new Map([["location", location]]) });
 const plain = (status) => ({ ok: status < 300, status, headers: new Map() });
+/** What the zone's origin (GitHub Pages) answers: it marks every answer with x-github-request-id. */
+const fromOrigin = (status) => ({ ok: status < 300, status, headers: new Map([["x-github-request-id", "ABCD:1234"]]) });
+
+/**
+ * Whether a Worker route pattern matches `url` (`host/path?query`), as Cloudflare does: the
+ * whole URL, query included; `*` only at the start of the host and the end of the path.
+ */
+const routeMatches = (pattern, url) => {
+  const bare = pattern.replace(/^https?:\/\//, "");
+  const [host, ...rest] = bare.split("/");
+  const [urlHost, ...urlRest] = url.split("/");
+  const hostOk = host.startsWith("*") ? urlHost.endsWith(host.slice(1)) : urlHost === host;
+  const path = `/${rest.join("/")}`;
+  const urlPath = `/${urlRest.join("/")}`;
+  return hostOk && (path.endsWith("*") ? urlPath.startsWith(path.slice(0, -1)) : urlPath === path);
+};
+
+/** The most specific matching route: an exact one wins, then the longest. */
+const routeFor = (routes, url) => routes
+  .filter((r) => routeMatches(r.pattern, url))
+  .sort((a, b) => (a.pattern.endsWith("*") - b.pattern.endsWith("*")) || b.pattern.length - a.pattern.length)[0];
+
+/**
+ * How the fake site answers a request no Access app or protected path stopped. No route:
+ * the origin. A route: its Worker, unless `state.workerPrefixes[script]` names the prefix it
+ * serves and the path is outside it, in which case the Worker passes it to the origin.
+ * `state.workerRedirectsQuery[script]` makes the Worker redirect `/<prefix>?q` to `/<prefix>/?q`.
+ */
+function siteAnswer(state, u) {
+  const route = routeFor(state.routes ?? [], `${u.hostname}${u.pathname}${u.search}`);
+  if (!route?.script || state.scripts?.includes(route.script) === false) return fromOrigin(200);
+  const own = state.workerPrefixes?.[route.script];
+  if (own && !(u.pathname === own || u.pathname.startsWith(`${own}/`))) return fromOrigin(404);
+  if (own && u.pathname === own && u.search && state.workerRedirectsQuery?.[route.script]) {
+    return { ok: false, status: 308, headers: new Map([["location", `${own}/${u.search}`]]) };
+  }
+  return plain(200);
+}
 
 export const ACCESS_LOGIN = `https://${TEAM}.cloudflareaccess.com/cdn-cgi/access/login/${DOMAIN}?kid=abc`;
 
@@ -92,7 +130,7 @@ export function fakeFetch(state) {
       const protectedPaths = state.protected ?? [];
       return protectedPaths.some((p) => u.pathname === p || u.pathname.startsWith(`${p}/`))
         ? redirect(ACCESS_LOGIN)
-        : plain(200);
+        : siteAnswer(state, u);
     }
     if (init.headers?.Authorization !== `Bearer ${SETUP_TOKEN}`) return denied();
     const path = u.pathname.replace("/client/v4", "");
@@ -156,6 +194,13 @@ export function fakeFetch(state) {
       const route = { id: `route-${state.routes.length + 1}`, ...body };
       state.routes.push(route);
       return jsonResponse(200, { success: true, result: route });
+    }
+    const oneRoute = path.match(/^\/zones\/([^/]+)\/workers\/routes\/([^/]+)$/);
+    if (oneRoute && method === "DELETE") {
+      const index = state.routes.findIndex((r) => r.id === decodeURIComponent(oneRoute[2]));
+      if (index === -1) return jsonResponse(404, { success: false, errors: [{ code: 10020, message: "route not found" }] });
+      state.routes.splice(index, 1);
+      return jsonResponse(200, { success: true, result: { id: decodeURIComponent(oneRoute[2]) } });
     }
     if (path === `${base}/workers/scripts` && method === "GET") {
       if (deny.includes("scripts")) return denied();

@@ -2,7 +2,8 @@
 
 Set up a new sub-app of the personal site in one command, and check from CI that its path is
 behind Cloudflare Access before every deploy. A sub-app meant for everyone can instead be set up
-as a public app with `--public`, which skips Access and gives it an R2 bucket and Worker routes.
+as a public app with `--public`, which skips Access and gives it an R2 bucket and the Worker
+route `<domain>/<prefix>*`.
 A sub-app that is signed in by default but has a few public paths is a mixed app: name each
 public path with `--public-path`, and it gets a second Access app whose destinations are exactly
 those paths. A path listed without a final `/*` is meant to be public on its own, so its Allow
@@ -52,10 +53,18 @@ says the two destinations will be reachable by anyone. The steps, in apply order
 2. **D1**, as above.
 3. **R2.** Find the bucket by name or create it. The name is the single `bucket_name` in the
    clone's `r2_buckets` (several names are a conflict; none means no R2 step).
-4. **Worker routes.** Exactly `<domain>/<prefix>` and `<domain>/<prefix>/*`, pointing at the
-   Worker named by `name` in the clone's `backend/wrangler.jsonc`. A route can only name a
-   deployed Worker (see the research notes), so before the first deploy the plan says so and
-   creates nothing here; re-run after that deploy to add the routes.
+4. **Worker route.** Exactly one, `<domain>/<prefix>*`, pointing at the Worker named by `name`
+   in the clone's `backend/wrangler.jsonc` (why one route and not `<domain>/<prefix>` +
+   `<domain>/<prefix>/*`, and what the Worker must do with it: see
+   [The Worker route and its pass-through](#the-worker-route-and-its-pass-through)). A route
+   can only name a deployed Worker (see the research notes), so before the first deploy the
+   plan says so and creates nothing here; re-run after that deploy to add the route. With
+   `--apply`, once the route exists, it waits until the route check passes (`verify --routes`,
+   below), and stops before GitHub, deleting nothing, if it never does. An app bootstrapped
+   before this change holds that same Worker's exact pair `<domain>/<prefix>` +
+   `<domain>/<prefix>/*`: the plan shows each as a `-` line, and apply deletes them only after
+   `<domain>/<prefix>*` exists and the check passes. Both point at the same Worker, so the app
+   answers throughout.
 5. **GitHub**, as above.
 
 `verify` fails by design on a public path, so a public app's deploy job does not run it.
@@ -314,8 +323,9 @@ ok, `1` a step failed, `2` usage error or a conflict in the plan.
     name several buckets, an entry with no `bucket_name` or an invalid one, or a
     `wrangler.jsonc` with no `name` for the routes;
   - a Worker route that reaches into the prefix and is not the app's own: one owned by another
-    Worker or by none, or one of the app's Worker that also matches paths outside the prefix
-    (`<domain>/work/election-atlas*` matches `/work/election-atlas-old` too);
+    Worker or by none (another Worker's `<domain>/<prefix>*`, `<domain>/<prefix>` or
+    `<domain>/<prefix>/*` included), or one of the app's Worker that also matches paths outside
+    the prefix and is not `<domain>/<prefix>*` (`<domain>/work/*` for `/work/election-atlas`);
   - with `--public`, a setup token that may not read R2 buckets, the zone, its Worker routes
     or the Worker scripts (the line names the permission; see the keychain table);
   - a missing deploy-token keychain entry.
@@ -323,16 +333,71 @@ ok, `1` a step failed, `2` usage error or a conflict in the plan.
   - a policy whose emails differ from the config;
   - an exact-match Access app that is not attached to the policy;
   - a broader route of another Worker, such as the home site's `<domain>/*`: the app's longer
-    patterns are more specific, so Cloudflare sends the prefix to the app;
+    pattern is more specific, so Cloudflare sends the prefix to the app;
+  - a route on a sibling path that `<domain>/<prefix>*` also matches, such as
+    `<domain>/work/election-atlas-old/*`: it is more specific, so it keeps its paths;
   - with `--public-path`, a Bypass app above the prefix (such as one on `<domain>`): the app's
     own destinations are more specific, so it does not reach the private paths.
 
   Changing who can sign in is a decision for the Zero Trust dashboard, not for a re-run.
 
+## The Worker route and its pass-through
+
+Cloudflare matches a Worker route against the whole request URL, **query string included**, and
+a route pattern cannot contain a query; its only wildcards are a leading `*` on the host and a
+trailing `*` on the path. So the exact route `<domain>/<prefix>` never matches
+`/<prefix>?<query>`, and `<domain>/<prefix>/*` needs the slash: `/graph?g=rag` matched no
+route and went to the zone's origin, GitHub Pages, which answered 404 (seen for every sub-app
+on 2026-11-15). The only pattern that matches it is **`<domain>/<prefix>*`**, so that is the one
+route every app's Worker gets: from `bootstrap --public`, and in the app's own
+`frontend/wrangler.jsonc` for the others:
+
+```jsonc
+"routes": [{ "pattern": "akshayprabhakant.com/graph*", "zone_name": "akshayprabhakant.com" }],
+```
+
+More specific routes still win under it (`/graph/api/*` on the API Worker, `/_site/*` on
+site-shell). But `<prefix>*` also matches every sibling path that starts with the prefix:
+`/graphfoo`, `/graphs`, `/graph.html`, `/graph-x/y`. **The app's Worker must pass each of those
+to the origin untouched**, returning `fetch(req)` for any path that is neither `/<prefix>` nor
+under `/<prefix>/`. A Worker's subrequest to its own zone goes to the origin and does not
+re-enter the Worker, and `fetch(req)` forwards the incoming request itself (method, headers,
+body; a 3xx comes back as is). At the top of the Worker's `fetch`, after any `/_site/*` forward
+(under `wrangler dev` the Worker stands in for site-shell's route), with `PREFIX` the app's
+prefix as a pattern such as `/^\/graph(?=\/|$)/`:
+
+```js
+const u = new URL(req.url);
+const ours = PREFIX.test(u.pathname);            // /graph or /graph/…, not /graphfoo
+u.pathname = u.pathname.replace(PREFIX, '') || '/';
+if (u.pathname.startsWith('/_site/') && env.SHELL) return env.SHELL.fetch(new Request(u, req));
+if (!ours) return fetch(req);                     // /graphfoo etc.: the origin, untouched
+```
+
+Then `/<prefix>?<query>` reaches the app. Whether it serves that in place or redirects to
+`/<prefix>/?<query>` (keeping the query) is the app's choice: redirect only when `/<prefix>` and
+`/<prefix>/` have the same Access (both signed in or both public) and the app's canonical URL
+has the trailing slash; otherwise serve in place. For a mixed app with `--public-path /<prefix>`
+but not `/<prefix>/`, serve in place:
+
+```js
+if (u.pathname === '/graph' && u.search) {
+  return new Response(null, { status: 308, headers: { location: `/graph/${u.search}` } });
+}
+```
+
+**Access does not change.** An Access app keeps exactly `<domain>/<prefix>` and
+`<domain>/<prefix>/*`: Access already matches `/<prefix>?<query>` with the `<prefix>`
+destination (signed out, `/graph?x=1` redirects to the login like `/graph`), and widening it to
+`<prefix>*` would put `/<prefix>foo` behind sign-in. Those sibling paths stay public, as before.
+They now count as Worker requests (the free plan allows 100,000 a day); they are 404s nobody
+links to.
+
 ## `verify`: the login check for deploy jobs
 
 ```sh
 portfolio-app verify --path /<prefix> --domain <host> [--team <team>] [--public-path <path>…]
+portfolio-app verify --routes --path /<prefix> --domain <host>
 ```
 
 Requests `https://<host>/<prefix>` and `https://<host>/<prefix>/portfolio-app-verify` without
@@ -371,6 +436,17 @@ their narrowing destinations. For time-track, the child of the public `/time-tra
 `/time-track/portfolio-app-verify` and `/time-track/api/portfolio-app-verify` as private, then
 `/time-track`, `/time-track/_next/portfolio-app-verify` and `/time-track/` as public. Without
 `--public-path`, `verify` behaves exactly as before.
+
+**`--routes`** checks the app's Worker route instead of Access, so it works for a public app
+too (and for a private one only shows what a signed-out visitor gets). It exits `0` only when
+`/<prefix>?portfolio-app-verify=1` answers with the status `/<prefix>` answers with, or
+redirects to `/<prefix>` or a path under `/<prefix>/` on the same host, and neither answer
+comes from the origin; and `/<prefix>portfolio-app-verify` does come from the origin. "From the
+origin" means the answer carries GitHub Pages' `x-github-request-id` header: the site's origin
+is GitHub Pages. A query probe from the origin means the Worker route misses
+`/<prefix>?<query>` (the exact `<domain>/<prefix>` route); a sibling probe without the header
+means the Worker serves paths outside its prefix. `bootstrap --public --apply` runs this check
+after creating the route. It is not combined with `--public-path`.
 
 **Limit:** a public path that answers a bare `401` or `403` fails the check. Access can answer
 that way, and so can Cloudflare's bot protection when it refuses an automated client; from a
@@ -425,7 +501,7 @@ after fixing the token resumes safely, since every step only fills in what is mi
 | Account · D1 · Edit | every run: the D1 database |
 | Account · Workers R2 Storage · Edit | `--public` when the clone binds an R2 bucket |
 | Zone · Zone · Read, on the site's zone | `--public`: finding the zone id for the routes |
-| Zone · Workers Routes · Edit, on the site's zone | `--public`: listing and creating the routes |
+| Zone · Workers Routes · Edit, on the site's zone | `--public`: listing, creating and replacing (deleting the old pair of) the route |
 | Account · Workers Scripts · Read | `--public`: checking the Worker is deployed before routing to it |
 
 Create each once (the `-w` with no value makes `security` prompt for it, so it stays out of
@@ -565,7 +641,7 @@ security add-generic-password -s portfolio-app -a cloudflare-deploy-token -w
   `POST /accounts/{account_id}/r2/buckets` with `{ "name" }` creates one and needs
   `Workers R2 Storage Write`. A missing bucket answers 404, which the plan reads as "create".
 - **Routes:** `GET`/`POST /zones/{zone_id}/workers/routes`, items `{ id, pattern, script }`,
-  needing `Workers Routes Read`/`Write`. The zone id comes from `GET /zones?name=<domain>`,
+  and `DELETE /zones/{zone_id}/workers/routes/{route_id}`, needing `Workers Routes Read`/`Write`. The zone id comes from `GET /zones?name=<domain>`,
   which lists only zones the token can read, so an empty answer means a missing Zone Read.
 - **Routes need a deployed Worker:** the create docs do not say so, but creating a route for a
   missing script is reported (in a Stack Overflow question, not the docs) to fail with
@@ -574,9 +650,15 @@ security add-generic-password -s portfolio-app -a cloudflare-deploy-token -w
   until the Worker exists. **Not confirmed against a live account.**
 - **Precedence:** when several route patterns match a request, the most specific one wins,
   which is why a broader route such as the home `<domain>/*` is left alone.
+- **Query strings (read 2026-11-15):** "Route pattern matching considers the entire request
+  URL, including the query parameter string. Since route patterns may not contain query
+  parameters, the only way to have a route pattern match URLs with query parameters is to
+  terminate it with a wildcard, `*`." Hence the one route `<domain>/<prefix>*`.
 - Sources:
   - [create route](https://developers.cloudflare.com/api/resources/workers/subresources/routes/methods/create/)
   - [list routes](https://developers.cloudflare.com/api/resources/workers/subresources/routes/methods/list/)
+  - [delete route](https://developers.cloudflare.com/api/resources/workers/subresources/routes/methods/delete/)
+  - [routes: matching behavior](https://developers.cloudflare.com/workers/configuration/routing/routes/)
   - [get bucket](https://developers.cloudflare.com/api/resources/r2/subresources/buckets/methods/get/)
   - [create bucket](https://developers.cloudflare.com/api/resources/r2/subresources/buckets/methods/create/)
   - [Workers errors (10007, Worker not found)](https://developers.cloudflare.com/workers/observability/errors/)

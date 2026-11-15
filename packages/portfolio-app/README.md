@@ -112,7 +112,9 @@ The Cloudflare Access step, in apply order:
    children stops here, with both Access apps already created; nothing is removed for you.
    The two apps start answering at different moments, so the first round in which every probe
    passes may hold private answers taken before the Bypass app was live. That round is run
-   again at once, and the second run decides.
+   again at once, and apply goes on only when the second run passes too. If the second run
+   fails, the wait carries on like after any failed round, until a round and its second run
+   both pass or the attempts run out.
 
 D1 and GitHub follow as for a private app. Each step only fills in what is missing, so a mixed
 run on an app that already has its Allow app, D1 and secrets creates only the Bypass policy and

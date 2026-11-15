@@ -349,17 +349,37 @@ test("mixed apply stops when the Bypass app goes live after a round's private pr
     if (u.pathname === "/graph/public") bypassLive = true;
     return bypassLive ? h.http.fetch(url, init) : { status: 302, headers: new Map([["location", ACCESS_LOGIN]]) };
   };
-  await assert.rejects(applyBootstrap({ ...h.deps, fetch: propagating }, actions, opts), (err) => {
+  let sleeps = 0;
+  await assert.rejects(applyBootstrap({ ...h.deps, fetch: propagating, sleep: async () => { sleeps += 1; } }, actions, opts), (err) => {
     assert.match(err.message, /^Access is not answering for \/graph: /);
     assert.ok(err.message.includes(`https://${DOMAIN}/graph/public/portfolio-app-verify answered 200 — not behind Access`), err.message);
     return true;
   });
   assert.equal(probed.indexOf("/graph/public/portfolio-app-verify") < probed.indexOf("/graph/public"), true,
     "the child was first answered before the Bypass app was live");
-  assert.equal(probed.filter((p) => p === "/graph/public/portfolio-app-verify").length, 2, "and asked again once it was");
+  assert.equal(sleeps, 11, "the failed second round is one more attempt; polling runs to its last attempt");
+  assert.equal(probed.filter((p) => p === "/graph/public/portfolio-app-verify").length, 13,
+    "asked again in the second round, then once in each remaining attempt");
   assert.ok(!h.logs.some((l) => l.includes("answer signed out")), "no success line");
   assert.deepEqual(api(writes(h.http.calls.slice(planCalls))), ["POST /access/policies", "POST /access/apps"]);
   assert.deepEqual(world.site.apps[0], ALLOW_APP, "the Allow app is untouched");
+});
+
+test("mixed apply keeps polling when the second round fails for a passing reason, and goes on once two rounds in a row pass", async () => {
+  const world = graphNotesWorld();
+  const h = harness(world);
+  const opts = gnOpts(makeClone(WRANGLER_GN_DONE));
+  const actions = await planBootstrap(h.deps, opts);
+  let publicRequests = 0;
+  const flaky = async (url, init) => {
+    if (new URL(url).pathname === "/graph/public" && ++publicRequests === 2) throw new Error("socket hang up");
+    return h.http.fetch(url, init);
+  };
+  let sleeps = 0;
+  await applyBootstrap({ ...h.deps, fetch: flaky, sleep: async () => { sleeps += 1; } }, actions, opts);
+  assert.equal(publicRequests, 4, "a passing round, its failed second round, then a passing round and its second round");
+  assert.equal(sleeps, 1, "one wait, after the failed second round");
+  assert.match(h.logs.join("\n"), /✓ \/graph redirects to test-team\.cloudflareaccess\.com, and its 6 public path\(s\) answer signed out/);
 });
 
 test("mixed apply passes under inheritance when the only exact public path is the prefix, whose children the Allow app's /* answers", async () => {

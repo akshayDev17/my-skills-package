@@ -108,15 +108,16 @@ export async function verifyPath({ fetch, domain, prefix, team, publicPaths = []
  * failure. A mixed app has two apps that start answering at different moments, so a
  * round can pass on private answers taken before the Bypass app was live. Its public
  * answers come after its private ones, so by the end of a passing round both apps are
- * answering; a second round, run at once, is the one that decides.
+ * answering, and a mixed app passes only when a second round, run at once, passes too.
+ * A second round that fails is one more failed attempt: polling goes on.
  */
 export async function waitForAccess({ fetch, domain, prefix, team, publicPaths = [], attempts = 12, delayMs = 5000, sleep }) {
   const round = () => verifyPath({ fetch, domain, prefix, team, publicPaths });
   let last;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     last = await round();
-    if (last.ok) return publicPaths.length > 0 ? round() : last;
-    if (attempt === attempts) return last;
+    if (last.ok && publicPaths.length > 0) last = await round();
+    if (last.ok || attempt === attempts) return last;
     await sleep(delayMs);
   }
   return last;

@@ -219,8 +219,8 @@ The Cloudflare Access step, in apply order:
    children, so a failed check may mean they are public. Apply reads the Bypass app again and
    sends it back with only `<domain>/<prefix>/` taken out. Everything else the app holds stays,
    no app is deleted, and nothing that existed before the run is removed. Then it runs the
-   wait again with the other public paths, and reports both: the original failure, what it
-   removed, and whether the site passes the check without `<prefix>/`. It exits 1 either way,
+   wait again with the other public paths, and reports all three: the original failure, what
+   it removed, and whether the site passes the check without `<prefix>/`. It exits 1 either way,
    and D1 and GitHub are not touched. The error reads `Rollback: removed <domain>/<prefix>/
    from Bypass app "<name>", which keeps …`, naming what the app still holds; the bare
    `<domain>/<prefix>` is always among it, because `/<prefix>/` is planned only alongside
@@ -489,13 +489,15 @@ security add-generic-password -s portfolio-app -a cloudflare-deploy-token -w
   `graph-notes (/graph)`; after that, a child of each exact public path redirected to the Access
   login while the exact paths stayed public. So the more specific `<path>/*` beats the inherited
   exact destination, and the tool now adds that narrowing destination itself for every exact
-  public path but the bare prefix, whose children the Allow app's own `<prefix>/*` already
-  answers. It still probes `<path>/portfolio-app-verify` for each one, in `--apply` and in
-  `verify`.
+  public path but the bare prefix and `<prefix>/` (next section), whose children the Allow
+  app's own `<prefix>/*` already answers. It still probes a child of each one, in `--apply`
+  and in `verify`.
 - **Updating an app:** `PUT /accounts/{account_id}/access/apps/{app_id}` replaces the app with
   the body sent; it is not a patch. So the tool reads the app with
   `GET /accounts/{account_id}/access/apps/{app_id}` and sends back all of it, with policies as
-  `{ id, precedence }` links and only the narrowing destinations added.
+  `{ id, precedence }` links and only its destinations changed: the narrowing ones added to the
+  Allow app, the newly listed public ones added to the Bypass app, or `<prefix>/` taken out of
+  the Bypass app again (step 5 of the mixed app's Access step).
 - **Not answered by the docs:**
   - which app applies when two apps hold the same destination. The tool never creates one:
     a listed destination held by any other app is a conflict.

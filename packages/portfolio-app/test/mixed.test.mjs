@@ -629,7 +629,7 @@ test("mixed, time-track re-run with /time-track/ when its children inherit it: a
   let sleeps = 0;
   await assert.rejects(applyBootstrap({ ...h.deps, sleep: async () => { sleeps += 1; } }, actions, opts), (err) => {
     assert.match(err.message, /^Access is not answering for \/time-track: https:\/\/example\.com\/time-track\/portfolio-app-verify answered 200 — not behind Access; https:\/\/example\.com\/time-track\/api\/portfolio-app-verify answered 200 — not behind Access\. /);
-    assert.match(err.message, /Rolled back: removed example\.com\/time-track\/ from Bypass app "time-track \(public\)", which keeps example\.com\/time-track \+ example\.com\/time-track\/_next\/\*\. After the rollback, the site passes the check without \/time-track\/$/);
+    assert.match(err.message, /Rollback: removed example\.com\/time-track\/ from Bypass app "time-track \(public\)", which keeps example\.com\/time-track \+ example\.com\/time-track\/_next\/\*\. Without \/time-track\/ listed, the site passes the check$/);
     return true;
   });
   assert.equal(sleeps, 0, "the children asked for sign-in before the run, so their first signed-out answer ends the wait");
@@ -657,7 +657,7 @@ test("mixed, time-track re-run with /time-track/ that never answers signed out: 
     ? { status: 302, headers: new Map([["location", ACCESS_LOGIN]]) } : h.http.fetch(url, init));
   let sleeps = 0;
   await assert.rejects(applyBootstrap({ ...h.deps, fetch: stillAsking, sleep: async () => { sleeps += 1; } }, actions, opts), (err) => {
-    assert.match(err.message, /^Access is not answering for \/time-track: https:\/\/example\.com\/time-track\/ 302 .*public path still asks for sign-in\. Rolled back: removed example\.com\/time-track\/ from Bypass app "time-track \(public\)", which keeps example\.com\/time-track \+ example\.com\/time-track\/_next\/\*\. After the rollback, the site passes the check without \/time-track\/$/);
+    assert.match(err.message, /^Access is not answering for \/time-track: https:\/\/example\.com\/time-track\/ 302 .*public path still asks for sign-in\. Rollback: removed example\.com\/time-track\/ from Bypass app "time-track \(public\)", which keeps example\.com\/time-track \+ example\.com\/time-track\/_next\/\*\. Without \/time-track\/ listed, the site passes the check$/);
     return true;
   });
   assert.equal(sleeps, 11, "no private path stopped asking for sign-in, so the wait runs to its last attempt");
@@ -679,7 +679,7 @@ test("mixed, fresh time-track with /time-track/ when its children inherit it: th
   let sleeps = 0;
   await assert.rejects(applyBootstrap({ ...h.deps, sleep: async () => { sleeps += 1; } }, actions, opts), (err) => {
     assert.match(err.message, /^Access is not answering for \/time-track: .*time-track\/portfolio-app-verify answered 200 — not behind Access/);
-    assert.match(err.message, /Rolled back: removed example\.com\/time-track\/ from Bypass app "time-track \(public\)", which keeps example\.com\/time-track \+ example\.com\/time-track\/_next\/\*\. After the rollback, the site passes the check without \/time-track\/$/);
+    assert.match(err.message, /Rollback: removed example\.com\/time-track\/ from Bypass app "time-track \(public\)", which keeps example\.com\/time-track \+ example\.com\/time-track\/_next\/\*\. Without \/time-track\/ listed, the site passes the check$/);
     return true;
   });
   assert.equal(sleeps, 0, "the children asked for sign-in before time-track/ was public, so the wait stops at once");
@@ -707,9 +707,108 @@ test("mixed rollback takes only <domain>/<prefix>/ out of an app that changed af
     return h.http.fetch(url, init);
   };
   await assert.rejects(applyBootstrap({ ...h.deps, fetch: meddling }, actions, opts),
-    /Rolled back: removed example\.com\/time-track\/ from Bypass app "time-track \(public\)", which keeps example\.com\/time-track \+ example\.com\/time-track\/_next\/\* \+ example\.com\/time-track\/other\. After the rollback, /);
+    /Rollback: removed example\.com\/time-track\/ from Bypass app "time-track \(public\)", which keeps example\.com\/time-track \+ example\.com\/time-track\/_next\/\* \+ example\.com\/time-track\/other\. Without \/time-track\/ listed, /);
   assert.deepEqual(world.site.apps.map((a) => a.name), ["time-track (/time-track)", "time-track (public)"]);
   assert.deepEqual(world.site.apps[1].destinations.map((d) => d.uri), [`${DOMAIN}/time-track`, `${DOMAIN}/time-track/_next/*`, `${DOMAIN}/time-track/other`]);
+});
+
+// The Cloudflare API as `applyBootstrap` reaches it, with one write changed by `intercept(url, init, pass)`.
+const withApi = (h, intercept) => ({ ...h.deps, cf: { ...h.deps.cf, fetch: (url, init = {}) => intercept(url, init, () => h.http.fetch(url, init)) } });
+const isAppWrite = (url, init, method) => (init.method ?? "GET") === method && /\/access\/apps(\/[^/]+)?$/.test(new URL(url).pathname);
+
+test("mixed, time-track re-run with /time-track/: a PUT that goes through and then fails still takes time-track/ out again", async () => {
+  const world = timeTrackTodayWorld();
+  world.site.slashOutranksWildcard = true;
+  const h = harness(world);
+  const opts = ttSlashOpts(makeClone(WRANGLER_TT_DONE));
+  const actions = await planBootstrap(h.deps, opts);
+  const planCalls = h.http.calls.length;
+  let puts = 0;
+  const responseLost = async (url, init, pass) => {
+    if (!isAppWrite(url, init, "PUT") || (puts += 1) > 1) return pass();
+    await pass();
+    throw new Error("socket hang up");
+  };
+  await assert.rejects(applyBootstrap(withApi(h, responseLost), actions, opts), (err) => {
+    assert.equal(err.message, `adding ${DOMAIN}/time-track/ to Bypass app "time-track (public)" failed: socket hang up. ` +
+      `Rollback: removed ${DOMAIN}/time-track/ from Bypass app "time-track (public)", which keeps ${DOMAIN}/time-track + ${DOMAIN}/time-track/_next/*. ` +
+      "Without /time-track/ listed, the site passes the check");
+    return true;
+  });
+  assert.deepEqual(api(writes(h.http.calls.slice(planCalls))), ["PUT /access/apps/app-tt-pub", "PUT /access/apps/app-tt-pub"]);
+  assert.deepEqual(world.site.apps.map((a) => a.destinations.map((d) => d.uri)), [[`${DOMAIN}/time-track/*`], [`${DOMAIN}/time-track`, `${DOMAIN}/time-track/_next/*`]],
+    "both apps hold exactly what they held before the run");
+  assert.deepEqual(h.logs, [
+    `  ! the write that adds ${DOMAIN}/time-track/ to Bypass app "time-track (public)" failed, and may have gone through all the same; taking ${DOMAIN}/time-track/ out again`,
+    `  - removed ${DOMAIN}/time-track/ from Bypass app "time-track (public)", which keeps ${DOMAIN}/time-track + ${DOMAIN}/time-track/_next/*`,
+  ]);
+  assert.deepEqual(world.site.d1.length, 1, "no second D1 database");
+});
+
+test("mixed, time-track re-run with /time-track/: a PUT stored under another spelling is reported, and the removal writes nothing it cannot name", async () => {
+  const world = timeTrackTodayWorld();
+  const h = harness(world);
+  const opts = ttSlashOpts(makeClone(WRANGLER_TT_DONE));
+  const actions = await planBootstrap(h.deps, opts);
+  const planCalls = h.http.calls.length;
+  const respelled = (url, init, pass) => (isAppWrite(url, init, "PUT")
+    ? h.http.fetch(url, { ...init, body: init.body.replace(`"${DOMAIN}/time-track/"`, `"${DOMAIN}/time-track/./"`) }) : pass());
+  await assert.rejects(applyBootstrap(withApi(h, respelled), actions, opts), (err) => {
+    assert.equal(err.message, `adding ${DOMAIN}/time-track/ to Bypass app "time-track (public)" failed: ` +
+      `Access app "time-track (public)" was updated but does not guard ${DOMAIN}/time-track/; check it in the Zero Trust dashboard. ` +
+      `Rollback: Bypass app "time-track (public)" does not hold ${DOMAIN}/time-track/, so nothing was removed; ` +
+      `it guards ${DOMAIN}/time-track + ${DOMAIN}/time-track/_next/* + ${DOMAIN}/time-track/./, check it in the Zero Trust dashboard now. ` +
+      "Without /time-track/ listed, the site passes the check");
+    return true;
+  });
+  assert.deepEqual(api(writes(h.http.calls.slice(planCalls))), ["PUT /access/apps/app-tt-pub"], "no second PUT: the app does not hold the destination by that name");
+});
+
+test("mixed, time-track re-run with /time-track/: a removal Cloudflare does not carry out is reported as not removed", async () => {
+  const world = timeTrackTodayWorld();
+  world.site.slashOutranksWildcard = true;
+  const h = harness(world);
+  const opts = ttSlashOpts(makeClone(WRANGLER_TT_DONE));
+  const actions = await planBootstrap(h.deps, opts);
+  let puts = 0;
+  const removalIgnored = (url, init, pass) => (isAppWrite(url, init, "PUT") && (puts += 1) === 2
+    ? h.http.fetch(url, { ...init, body: JSON.stringify(world.site.apps[1]) }) : pass());
+  await assert.rejects(applyBootstrap(withApi(h, removalIgnored), actions, opts), (err) => {
+    assert.match(err.message, /\. Rollback: tried to remove example\.com\/time-track\/ from Bypass app "time-track \(public\)", but it still holds it; remove it in the Zero Trust dashboard now\. Without \/time-track\/ listed, the site still fails the check: /);
+    assert.doesNotMatch(err.message, /Rollback: removed/);
+    return true;
+  });
+  assert.ok(world.site.apps[1].destinations.some((d) => d.uri === `${DOMAIN}/time-track/`));
+});
+
+test("mixed, fresh time-track with /time-track/: a failed create of the Bypass app says it may exist holding time-track/; without /time-track/ the error is Cloudflare's own", async () => {
+  for (const [publicPaths, expected] of [
+    [TT_SLASH, `creating Bypass app "time-track (public)" failed: socket hang up. The app may exist all the same, holding ${DOMAIN}/time-track/, ` +
+      "and without its id this run cannot take that out again; check for it in the Zero Trust dashboard now"],
+    [TT.publicPaths, "socket hang up"],
+  ]) {
+    const world = timeTrackWorld();
+    const cloneDir = makeClone(WRANGLER_TT);
+    const h = harness(world);
+    const opts = { ...ttOpts(cloneDir), publicPaths };
+    const actions = await planBootstrap(h.deps, opts);
+    const planCalls = h.http.calls.length;
+    let posts = 0;
+    const responseLost = async (url, init, pass) => {
+      if (!isAppWrite(url, init, "POST") || (posts += 1) !== 2) return pass();
+      await pass();
+      throw new Error("socket hang up");
+    };
+    await assert.rejects(applyBootstrap(withApi(h, responseLost), actions, opts), (err) => {
+      assert.equal(err.message, expected);
+      return true;
+    });
+    assert.deepEqual(api(writes(h.http.calls.slice(planCalls))), ["POST /access/policies", "POST /access/apps", "POST /access/policies", "POST /access/apps"],
+      "nothing is written after the failed create");
+    assert.deepEqual(world.site.d1, [], "no D1 database");
+    assert.deepEqual(world.local.github, { environment: false, secrets: [] }, "GitHub untouched");
+    assert.equal(readFileSync(join(cloneDir, "backend", "wrangler.jsonc"), "utf8"), WRANGLER_TT);
+  }
 });
 
 test("mixed refuses /<prefix>/ listed without /<prefix>, for a new and an existing public app: a plan conflict, exit 2, nothing written", async () => {

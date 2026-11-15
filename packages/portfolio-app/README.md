@@ -221,10 +221,21 @@ The Cloudflare Access step, in apply order:
    no app is deleted, and nothing that existed before the run is removed. Then it runs the
    wait again with the other public paths, and reports both: the original failure, what it
    removed, and whether the site passes the check without `<prefix>/`. It exits 1 either way,
-   and D1 and GitHub are not touched. The error reads `Rolled back: removed <domain>/<prefix>/
+   and D1 and GitHub are not touched. The error reads `Rollback: removed <domain>/<prefix>/
    from Bypass app "<name>", which keeps …`, naming what the app still holds; the bare
    `<domain>/<prefix>` is always among it, because `/<prefix>/` is planned only alongside
-   `/<prefix>`.
+   `/<prefix>`. It ends with `Without /<prefix>/ listed, the site passes the check` or the
+   probes that still fail.
+   The same removal runs when the write that adds `<domain>/<prefix>/` to an existing Bypass
+   app fails, because a `PUT` can go through and still fail (a lost response, or an answer
+   that does not list the destination as sent). Apply reads the app again and sends a removal
+   only if the app holds `<domain>/<prefix>/` under exactly that name. Otherwise the error says
+   `does not hold <domain>/<prefix>/, so nothing was removed`, lists what the app guards, and
+   asks you to check it in the dashboard now. If Cloudflare answers the removal with the
+   destination still there, the error says `tried to remove … but it still holds it`.
+   A failed create of a new Bypass app that would hold `<domain>/<prefix>/` gives no app id to
+   work with, so that error says the app may exist all the same and must be checked in the
+   dashboard now.
    Before such a run adds `<domain>/<prefix>/`, apply records which private probes ask for
    sign-in. If one of those answers signed out during the wait, the run has made it public, so
    the wait stops at once and the destination comes out, instead of staying public until the

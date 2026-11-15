@@ -75,6 +75,26 @@ class NewLink(BaseModel):
         "'forward': an arrow from from_note to to_note. 'both': arrows at both ends. 'none': a plain line."))
 
 
+class NewGroupBox(BaseModel):
+    label: str = Field(description=(
+        "The box's label, e.g. 'Training'. It is shown on the box and names the cluster of the notes inside it."))
+    notes: list[str] = Field(min_length=1, description=(
+        "The ids of the notes (or other cards) the box holds: exactly these, and no others."))
+    collapsed: bool = Field(default=False, description=(
+        "True to have the box start collapsed in the web app: only its label shows, and its notes and their "
+        "links are hidden until the reader opens it."))
+
+
+class GroupBoxChange(BaseModel):
+    id: str = Field(description="The id of the group box to change, as read_graph lists it in group_boxes.")
+    label: str | None = Field(default=None, description="Its new label (this renames its cluster); leave out to keep it.")
+    notes: list[str] | None = Field(default=None, description=(
+        "The full set of notes (or other cards) it should hold from now on; the box is refitted around them. "
+        "Leave out to keep what it holds."))
+    collapsed: bool | None = Field(default=None, description=(
+        "True to have it start collapsed in the web app, false to have it start open; leave out to keep it."))
+
+
 class LinkOfNewNotes(NewLink):
     from_note: str = Field(description="Where the link starts: the `key` of a note in this call, or an existing note's id.")
     to_note: str = Field(description="Where the link points: the `key` of a note in this call, or an existing note's id.")
@@ -86,11 +106,17 @@ def slug_for(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", plain.lower()).strip("-")[:63].rstrip("-") or "graph"
 
 
+def graph_url(app_url: str, slug: str) -> str:
+    """The graph's page in the web app: the app's own address with its slash, ``/graph/?g=<slug>``.
+    The bare ``/graph?g=<slug>`` is answered with a 308 redirect to it; linking the page itself saves that redirect."""
+    return f"{app_url}/?g={slug}"
+
+
 def summary(app_url: str, row: dict) -> dict:
     """A graph as the model sees it in a list: no canvas, and nobody's email."""
     shown = {"slug": row["slug"], "title": row["title"], "version": row["version"]["n"],
              "saved_at": row["version"]["saved_at"], "visibility": row["visibility"], "mine": row["mine"],
-             "url": f"{app_url}?g={row['slug']}"}
+             "url": graph_url(app_url, row["slug"])}
     if row["visibility"] == "public":
         shown["public_url"] = f"{app_url}/public?g={row['slug']}"
     if row.get("deleted_at"):
@@ -171,7 +197,8 @@ def build_server(api: Api) -> FastMCP:
             "as it was then."))] = None,
     ) -> dict:
         """Returns what a graph contains: its notes (id, text, clusters), the links between them, its
-        clusters, and its current version number. Call this before changing a graph."""
+        clusters, its group boxes (id, label, the notes each holds, whether it starts collapsed) and its
+        current version number. Call this before changing a graph."""
         if at_version is None:
             return shown(read(slug))
         old = client.read_version(api, slug, at_version)
@@ -305,6 +332,40 @@ def build_server(api: Api) -> FastMCP:
     def unlink_notes(slug: Slug, version: Version, link_ids: Annotated[list[str], Field(min_length=1)]) -> dict:
         """Removes links (by link id, as read_graph shows them) in one saved version. The notes stay."""
         return edit(slug, version, lambda doc: (canvas.remove_links(doc, link_ids), {"removed": link_ids}))
+
+    # ── group boxes ────────────────────────────────────────────────────────
+
+    def boxed(after: dict, boxes: list[dict], moved: list[str], notices: list[str], key: str) -> tuple[dict, dict]:
+        return after, {key: boxes, "moved": moved, **({"notices": notices} if notices else {})}
+
+    @tool(REPLACES)
+    def add_group_boxes(slug: Slug, version: Version, boxes: Annotated[list[NewGroupBox], Field(min_length=1)]) -> dict:
+        """Draws labelled group boxes, each around the notes you name, all in one saved version. A box
+        holds exactly the notes inside it, so the server sizes each box to its notes and, when other
+        notes or another box are in the way, moves notes so that each box holds only its own and no two
+        boxes overlap. The result lists the new boxes and every note that moved."""
+        def change(doc: dict) -> tuple[dict, dict]:
+            return boxed(*canvas.add_group_boxes(doc, [b.model_dump() for b in boxes]), "added")
+        return edit(slug, version, change)
+
+    @tool(REPLACES)
+    def update_group_boxes(slug: Slug, version: Version, boxes: Annotated[list[GroupBoxChange], Field(min_length=1)]) -> dict:
+        """Changes group boxes, all in one saved version: renames them (a renamed box stays where it is and
+        only widens when the new label needs more room), changes which notes each holds
+        (the box is refitted around them, moving notes as add_group_boxes does), or sets whether each
+        starts collapsed. What you leave out stays as it is. The result lists every note that moved."""
+        def change(doc: dict) -> tuple[dict, dict]:
+            return boxed(*canvas.update_group_boxes(doc, [b.model_dump() for b in boxes]), "updated")
+        return edit(slug, version, change)
+
+    @tool(REPLACES)
+    def remove_group_boxes(slug: Slug, version: Version, box_ids: Annotated[list[str], Field(min_length=1)]) -> dict:
+        """Removes group boxes (by id, as read_graph lists them in group_boxes) in one saved version. The
+        notes inside stay where they are, with their links; they leave only the boxes' clusters."""
+        def change(doc: dict) -> tuple[dict, dict]:
+            after, links = canvas.remove_group_boxes(doc, box_ids)
+            return after, {"removed": box_ids, **({"links_removed": links} if links else {})}
+        return edit(slug, version, change)
 
     return mcp
 

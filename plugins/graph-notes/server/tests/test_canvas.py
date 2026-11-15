@@ -60,7 +60,7 @@ def test_the_plain_form_has_notes_links_and_clusters_and_no_geometry():
     assert plain["notes"][0] == {"id": "api", "text": "## Read API\nServes `/graph/api/*` from D1.", "clusters": ["auth", "backend"]}
     assert {"id": "e4", "from_note": "access", "to_note": "api", "direction": "both", "label": "guards"} in plain["links"]
     assert {"name": "backend", "made_by": "group box", "members": ["api", "ingest", "d1"]} in plain["clusters"]
-    assert plain["group_boxes"][0] == {"id": "grp-backend", "label": "Backend", "cluster": "backend", "contains": ["api", "ingest", "d1"]}
+    assert plain["group_boxes"][0] == {"id": "grp-backend", "label": "Backend", "cluster": "backend", "contains": ["api", "ingest", "d1"], "collapsed": False}
     text = repr(plain)
     assert not any(key in text for key in ("'x'", "'width'", "fromSide", "styleAttributes", "color"))
 

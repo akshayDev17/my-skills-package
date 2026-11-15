@@ -148,3 +148,42 @@ def test_a_copy_holds_the_same_canvas(seeded):
     app, slug, before = seeded
     app.call("copy_graph", slug=slug, title="The copy", new_slug="the-copy")
     assert stored(app.edge.canvas("the-copy")) == stored(before)
+
+
+def test_drawing_a_box_appends_it_and_changes_only_the_places_of_the_cards_it_says_moved(seeded):
+    app, slug, before = seeded
+    one, two = first_two_notes(before)
+    added = app.call("add_group_boxes", slug=slug, version=1, boxes=[{"label": "Round trip", "notes": [one["id"], two["id"]]}])
+    box, moved = added["added"][0]["id"], added["moved"]
+    after = app.edge.canvas(slug)
+    assert after["nodes"][-1]["id"] == box and added["added"][0]["contains"] == [one["id"], two["id"]]
+    assert stored(after, box, *moved) == stored(before, *moved)
+    was = {n["id"]: n for n in before["nodes"]}
+    for n in after["nodes"]:
+        if n["id"] in moved:
+            assert list(n) == list(was[n["id"]])
+            assert store.dumps({k: v for k, v in n.items() if k not in ("x", "y")}) == store.dumps(
+                {k: v for k, v in was[n["id"]].items() if k not in ("x", "y")})
+
+
+@pytest.mark.parametrize("slug", ["example", "odd"])  # the canvases with a group box the person drew
+def test_renaming_collapsing_and_removing_a_drawn_box_change_only_that_box(slug):
+    app = App()
+    before = copy.deepcopy(CANVASES[slug])
+    app.edge.seed(slug, copy.deepcopy(before))
+    box = next(n for n in before["nodes"] if n["type"] == "group")
+    app.call("update_group_boxes", slug=slug, version=1, boxes=[{"id": box["id"], "label": "Renamed box"}])
+    after = app.edge.canvas(slug)
+    assert stored(after, box["id"]) == stored(before, box["id"])
+    assert store.dumps(next(n for n in after["nodes"] if n["id"] == box["id"])) == store.dumps({**box, "label": "Renamed box"})
+
+    flipped = not box.get("collapsed")
+    app.call("update_group_boxes", slug=slug, version=2, boxes=[{"id": box["id"], "collapsed": flipped}])
+    changed = next(n for n in app.edge.canvas(slug)["nodes"] if n["id"] == box["id"])
+    expected = {k: v for k, v in {**box, "label": "Renamed box"}.items() if k != "collapsed"} | ({"collapsed": True} if flipped else {})
+    assert store.dumps(changed) == store.dumps(expected)
+
+    removed = app.call("remove_group_boxes", slug=slug, version=3, box_ids=[box["id"]])
+    attached = [e["id"] for e in before["edges"] if box["id"] in (e["fromNode"], e["toNode"])]
+    assert removed.get("links_removed", []) == attached
+    assert stored(app.edge.canvas(slug)) == stored(before, box["id"], *attached)

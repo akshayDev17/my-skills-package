@@ -18,6 +18,7 @@ TOOLS = {
     "create_graph", "copy_graph", "rename_graph", "set_visibility", "restore_version",
     "trash_graph", "restore_from_trash",
     "add_notes", "update_notes", "remove_notes", "link_notes", "unlink_notes",
+    "add_group_boxes", "update_group_boxes", "remove_group_boxes",
 }
 
 
@@ -56,7 +57,7 @@ def test_the_about_graphs_tool_explains_a_graph(app):
 def test_create_then_list_then_read(app):
     made = new_graph(app, "Ünïcode & Spaces!  ")
     assert made == {"slug": "unicode-spaces", "title": "Ünïcode & Spaces!", "version": 1, "saved_at": made["saved_at"],
-                    "visibility": "private", "mine": True, "url": "https://graph.test/graph?g=unicode-spaces"}
+                    "visibility": "private", "mine": True, "url": "https://graph.test/graph/?g=unicode-spaces"}
     assert app.call("create_graph", title="Second", slug="my-own-slug")["slug"] == "my-own-slug"
     listed = app.call("list_graphs")
     assert sorted(g["slug"] for g in listed["mine"]) == ["my-own-slug", "unicode-spaces"] and listed["public_from_others"] == []
@@ -268,3 +269,61 @@ def test_the_client_can_send_nothing_but_its_routes_and_no_slug_can_escape_its_p
             client.call(app.api, method, path)
     assert len(app.edge.requests) == sent
     assert [g["slug"] for g in app.call("list_trash")["trash"]] == ["plan"]  # still there to restore
+
+
+def test_group_boxes_are_drawn_changed_and_removed_and_each_call_is_one_version(app):
+    new_graph(app)
+    steps = app.call("add_notes", slug="plan", version=1, notes=[{"text": f"Step {i}", "key": f"s{i}"} for i in range(1, 9)],
+                     links=[{"from_note": f"s{i}", "to_note": f"s{i + 1}"} for i in range(1, 8)])
+    ids = [n["id"] for n in steps["added"]]
+    made = app.call("add_group_boxes", slug="plan", version=2, boxes=[
+        {"label": "Training", "notes": ids[:4]}, {"label": "Inference", "notes": ids[4:], "collapsed": True}])
+    assert made["version"] == 3 and made["moved"] == [] and "notices" not in made
+    training, inference = made["added"]
+    assert training == {"id": training["id"], "label": "Training", "cluster": "training", "contains": ids[:4], "collapsed": False}
+    assert inference["contains"] == ids[4:] and inference["collapsed"] is True
+
+    graph = app.call("read_graph", slug="plan")
+    assert graph["group_boxes"] == made["added"]
+    assert {c["name"]: (c["made_by"], c["members"]) for c in graph["clusters"]} == {
+        "training": ("group box", ids[:4]), "inference": ("group box", ids[4:])}
+    assert all(n["clusters"] == (["training"] if n["id"] in ids[:4] else ["inference"]) for n in graph["notes"])
+
+    changed = app.call("update_group_boxes", slug="plan", version=3, boxes=[
+        {"id": inference["id"], "label": "Serving", "collapsed": False}, {"id": training["id"], "notes": ids[:3]}])
+    assert changed["version"] == 4 and [b["id"] for b in changed["updated"]] == [inference["id"], training["id"]]
+    assert changed["updated"][0] == {**inference, "label": "Serving", "cluster": "serving", "collapsed": False}
+    assert changed["updated"][1]["contains"] == ids[:3]
+    graph = app.call("read_graph", slug="plan")
+    assert next(n for n in graph["notes"] if n["id"] == ids[3])["clusters"] == []
+
+    removed = app.call("remove_group_boxes", slug="plan", version=4, box_ids=[training["id"]])
+    assert removed["version"] == 5 and removed["removed"] == [training["id"]]
+    graph = app.call("read_graph", slug="plan")
+    assert [b["id"] for b in graph["group_boxes"]] == [inference["id"]] and len(graph["notes"]) == 8
+
+
+@pytest.mark.parametrize("tool, arguments", [
+    ("add_group_boxes", {"boxes": [{"label": "Late", "notes": ["n"]}]}),
+    ("update_group_boxes", {"boxes": [{"id": "g", "label": "Late"}]}),
+    ("remove_group_boxes", {"box_ids": ["g"]}),
+])
+def test_a_box_change_from_an_outdated_version_saves_nothing(app, tool, arguments):
+    app.edge.seed("plan", {"nodes": [{"id": "g", "type": "group", "label": "G", "x": -20, "y": -56, "width": 300, "height": 196},
+                                     {"id": "n", "type": "text", "text": "N", "x": 0, "y": 0, "width": 260, "height": 120}]})
+    app.call("rename_graph", slug="plan", version=1, title="Moved on")
+    before = app.edge.canvas("plan")
+    with pytest.raises(ToolError, match="Nothing was saved: 'plan' has changed since version 1 and is now at version 2"):
+        app.call(tool, slug="plan", version=1, **arguments)
+    assert app.edge.canvas("plan") == before and app.call("read_graph", slug="plan")["version"] == 2
+
+
+def test_every_link_to_a_graph_is_the_apps_page_with_its_slash(app):
+    """``/graph/?g=<slug>`` is the app's page; the bare ``/graph?g=<slug>`` is answered with a 308
+    redirect to it, which a link to the page itself saves."""
+    made = new_graph(app)
+    results = [made, app.call("read_graph", slug="plan"), *app.call("list_graphs")["mine"],
+               app.call("add_notes", slug="plan", version=1, notes=[{"text": "x"}]), app.call("trash_graph", slug="plan")]
+    results += app.call("list_trash")["trash"]
+    assert {r["url"] for r in results} == {"https://graph.test/graph/?g=plan"}
+    assert "graph?g=" not in json.dumps(results)

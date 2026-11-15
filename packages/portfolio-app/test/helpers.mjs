@@ -42,7 +42,18 @@ const denied = () => jsonResponse(403, { success: false, errors: [{ code: 10000,
 const destinationCovers = (uri, target) =>
   uri.endsWith("/*") ? target.startsWith(uri.slice(0, -1))
     : !uri.includes("/") ? target.split("/")[0] === uri
-    : target === uri || target.startsWith(`${uri}/`);
+    : target === uri || target.startsWith(uri.endsWith("/") ? uri : `${uri}/`);
+
+/**
+ * How specific a covering destination is for `target`. A destination equal to the request
+ * path wins outright; otherwise the longest covering one does. A trailing-slash destination
+ * such as `example.com/time-track/` also covers the paths under it, as any exact
+ * destination does, and loses to the one character longer `example.com/time-track/*`
+ * there: the docs do not rank the two. `state.slashOutranksWildcard` models the other
+ * reading, in which the trailing-slash destination wins for its children too.
+ */
+const specificity = (state, uri, target) =>
+  uri === target ? Infinity : uri.length + (state.slashOutranksWildcard && uri.endsWith("/") ? 2 : 0);
 
 /**
  * How the fake site's Access answers a request, as Cloudflare does: the app with the
@@ -53,7 +64,8 @@ function accessAnswer(state, target) {
   let best = null;
   for (const app of state.apps ?? []) {
     for (const uri of appUris(app)) {
-      if (destinationCovers(uri, target) && (!best || uri.length > best.uri.length)) best = { app, uri };
+      const rank = specificity(state, uri, target);
+      if (destinationCovers(uri, target) && (!best || rank > best.rank)) best = { app, uri, rank };
     }
   }
   if (!best) return null;

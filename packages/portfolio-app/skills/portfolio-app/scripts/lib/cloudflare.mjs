@@ -121,16 +121,30 @@ export async function updateAccessApp(cf, appId, app) {
   return (await cfRequest(cf, "PUT", `/accounts/${cf.accountId}/access/apps/${encodeURIComponent(appId)}`, app)).result;
 }
 
+/** A PUT body: `app`'s full settings with `destinations` in place, policies as `{ id, precedence }` links. */
+const withDestinations = (app, destinations) => ({
+  ...app,
+  destinations,
+  policies: (app.policies ?? []).map((p, i) => ({ id: p.id, precedence: p.precedence ?? i + 1 })),
+});
+
 /**
  * `app`'s full settings with `uris` appended to its destinations, every other field as it
  * was. Its policies are sent as `{ id, precedence }` links, keeping each id and precedence.
  */
 export function withAddedDestinations(app, uris) {
-  return {
-    ...app,
-    destinations: [...app.destinations, ...uris.map((uri) => ({ type: "public", uri }))],
-    policies: (app.policies ?? []).map((p, i) => ({ id: p.id, precedence: p.precedence ?? i + 1 })),
-  };
+  return withDestinations(app, [...app.destinations, ...uris.map((uri) => ({ type: "public", uri }))]);
+}
+
+/**
+ * `app`'s full settings with the one destination `uri` taken out, and at least one left.
+ * `domain` names the app's first destination when the tool creates it; if it named `uri`,
+ * it names the first that stays.
+ */
+export function withoutDestination(app, uri) {
+  const destinations = app.destinations.filter((d) => d.uri !== uri);
+  const rest = withDestinations(app, destinations);
+  return app.domain === uri ? { ...rest, domain: destinations[0].uri } : rest;
 }
 
 export async function findD1(cf, name) {

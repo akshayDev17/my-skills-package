@@ -39,13 +39,16 @@ export function accessDestinations(domain, prefix) {
 const PUBLIC_SEGMENT = /^[A-Za-z0-9._~-]+$/;
 
 /**
- * A mixed app's public path, as `/<prefix>`, `/<prefix>/<path>` or `/<prefix>/<path>/*`,
- * or throws saying why it is refused. Public paths are always named, never inferred, and
- * may not reach outside the app's own prefix or cover all of it (that is `--public`).
+ * A mixed app's public path, as `/<prefix>`, `/<prefix>/`, `/<prefix>/<path>` or
+ * `/<prefix>/<path>/*`, or throws saying why it is refused. Public paths are always named,
+ * never inferred, and may not reach outside the app's own prefix or cover all of it (that
+ * is `--public`). `/<prefix>/` (the prefix's trailing-slash path, exactly) is the one path
+ * with an empty segment; it is an exact path like the others.
  */
 export function normalizePublicPath(raw, prefix) {
   const input = String(raw ?? "").trim();
   const path = `/${input.replace(/^\/+/, "")}`;
+  if (path === `${prefix}/`) return path;
   const refuse = (why) => new Error(`refusing public path "${input}": ${why}`);
   const wildcard = path.endsWith("/*");
   const body = wildcard ? path.slice(0, -2) : path;
@@ -54,7 +57,7 @@ export function normalizePublicPath(raw, prefix) {
     throw refuse(`the only wildcard allowed is a final "/*"`);
   }
   if (segments.some((s) => !PUBLIC_SEGMENT.test(s) || s === "." || s === "..")) {
-    throw refuse(`use letters, digits, ".", "_", "~" or "-" in each segment — no empty, "." or ".." segments, queries or spaces`);
+    throw refuse(`use letters, digits, ".", "_", "~" or "-" in each segment — no empty, "." or ".." segments, queries or spaces (the one trailing "/" allowed is ${prefix}/ itself)`);
   }
   if (body !== prefix && !body.startsWith(`${prefix}/`)) {
     throw refuse(`it is outside the app's prefix ${prefix}`);
@@ -82,12 +85,13 @@ export function privateDestinations(domain, prefix, publicPaths) {
  * A mixed app's narrowing destinations: `<path>/*` for each public path listed without a
  * `/*`, so the paths under it ask for sign-in. Cloudflare lets a sub-path inherit its
  * parent's rule, so without one an exact Bypass destination opens its children too (seen
- * on the live account, 2026-11-15). None for the bare prefix, whose children are already
- * the Allow app's `<prefix>/*`, nor for a path whose children a listed wildcard makes public.
+ * on the live account, 2026-11-15). None for the bare prefix or `<prefix>/`, whose
+ * children are already the Allow app's `<prefix>/*` (for `<prefix>/` that would be the
+ * narrowing destination itself), nor for a path whose children a listed wildcard makes public.
  */
 export function narrowingDestinations(domain, prefix, publicPaths) {
   return publicPaths
-    .filter((p) => !p.endsWith("/*") && p !== prefix)
+    .filter((p) => !p.endsWith("/*") && p !== prefix && p !== `${prefix}/`)
     .filter((p) => !publicPaths.some((w) => w.endsWith("/*") && pathCovers(w, `${p}/x`)))
     .map((p) => `${domain}${p}/*`);
 }

@@ -17,10 +17,23 @@
 // plus a narrowing `<path>/*` for each exact public path but the bare prefix, so the
 // children of that path ask for sign-in rather than inherit its Bypass. Apply waits until
 // the private paths (a child of each exact public path among them) redirect to the login
-// and the public ones answer signed out. The one change it makes to an existing app is
-// adding missing narrowing destinations to the Allow app, which only shrinks what is
-// public; it never removes or alters a destination, or moves one out of an existing app,
-// and anything else in the way is a conflict.
+// and the public ones answer signed out. It changes an existing app in two ways only, both
+// by adding destinations: missing narrowing ones to the Allow app, which only shrinks what
+// is public, and newly listed public paths to the public app. It never removes or alters
+// a destination that was there before the run, or moves one out of an existing app, and
+// anything else in the way is a conflict. A failed check leaves the apps the run created
+// in place for inspection.
+//
+// The prefix's trailing-slash path `/<prefix>/` is an exact public path like any other,
+// but it is the parent of every page under the prefix: a destination covers its subpaths,
+// and the docs do not say whether `<prefix>/` or the Allow app's `<prefix>/*` wins for
+// `<prefix>/<child>`. No narrowing destination can help (it would be `<prefix>/*` itself),
+// so the child probes are what show the children still ask for sign-in. A run that added
+// `<domain>/<prefix>/` and then fails its check is the one case in which apply takes
+// something out again: that one destination, from the Bypass app the run put it in. It
+// then checks once more without it. Nothing else is removed, and no app is deleted.
+// `/<prefix>/` is planned only alongside `/<prefix>`, so that app always keeps the bare
+// prefix; `/<prefix>/` listed without it is a conflict.
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -49,6 +62,7 @@ import {
   policyEmails,
   updateAccessApp,
   withAddedDestinations,
+  withoutDestination,
   workerExists,
 } from "./cloudflare.mjs";
 import { D1_PLACEHOLDER, d1Target, parseJsonc, r2Target, replacePlaceholder } from "./wrangler-config.mjs";
@@ -88,22 +102,27 @@ async function readWithScope(scope, what, read) {
 }
 
 /**
- * Why `app` cannot take the narrowing destinations by a plain PUT, or null if it can:
- * a self-hosted app whose paths are all public `destinations`, with no Bypass policy.
+ * Why `app` cannot take more destinations by a plain PUT, or null if it can: a self-hosted
+ * app whose paths are all public `destinations`.
  */
-function narrowingRefusal(app, policies) {
+function putRefusal(app) {
   if ((app.type ?? "self_hosted") !== "self_hosted") return `it is a ${app.type} app, not self-hosted`;
   if (!(app.destinations ?? []).length) return "its paths are in the deprecated self_hosted_domains, not destinations";
   if (app.destinations.some((d) => (d.type ?? "public") !== "public")) return "it holds a destination that is not a public hostname";
-  if (appPolicies(app, policies).some((p) => p.decision === "bypass")) return "it has a Bypass policy, so a destination added to it would not ask for sign-in";
   return null;
+}
+
+/** Why the Allow app cannot take the narrowing destinations, or null: as `putRefusal`, and no Bypass policy. */
+function narrowingRefusal(app, policies) {
+  const bypass = appPolicies(app, policies).some((p) => p.decision === "bypass");
+  return putRefusal(app) ?? (bypass ? "it has a Bypass policy, so a destination added to it would not ask for sign-in" : null);
 }
 
 /**
  * The Allow app. For a mixed app it holds the base destinations plus a narrowing
  * destination per exact public path (see prefix.mjs). An existing app holding the base
  * ones and only some of the narrowing ones gets the rest added: the one change the tool
- * makes to an existing app, because it only shrinks what is public.
+ * makes to an existing Allow app, and it only shrinks what is public.
  */
 async function planAccess({ cf }, { repo, prefix, config, publicPaths = [] }) {
   const actions = [];
@@ -170,22 +189,33 @@ async function planAccessCheck({ fetch }, { prefix, config, publicPaths = [] }) 
       : `now: ${now.results.map((r) => `${r.url} ${r.reason}`).join("; ")}` }];
 }
 
+/** Whether a planned action puts `slash` (`<domain>/<prefix>/`) into a Bypass app: what apply takes out again if its check fails. */
+const addsSlashDestination = (action, slash) =>
+  action.state === "create" && (action.kind === "bypass-app" || action.kind === "bypass-app-add") && action.uris.includes(slash);
+
 const NEVER_MOVE = "a destination stays with the app that holds it — the tool never removes, alters or moves one out of an existing app; fix it by hand";
 
 /**
  * Mixed apps only: the Bypass-for-Everyone app on exactly the listed public paths, and
  * the reusable Bypass policy it links. An app holding exactly those destinations is
- * reused if every policy on it is Bypass for Everyone. Conflicts: any other app holding
- * a listed destination, an app with the public app's name holding anything else, and a
- * Bypass app that opens more of the prefix than the list. A Bypass app above the prefix
- * (say `<domain>/*`) is left alone: the app's own destinations are more specific.
+ * reused if every policy on it is Bypass for Everyone. The public app (by its name)
+ * holding only some of them, Bypass for Everyone and open to a plain PUT, gets the rest
+ * added: a re-run with one more public path adds only that destination. Conflicts: any
+ * other app holding a listed destination, an app with the public app's name holding
+ * anything else, and a Bypass app that opens more of the prefix than the list. A Bypass
+ * app above the prefix (say `<domain>/*`) is left alone: the app's own destinations are
+ * more specific. `/<prefix>/` listed without `/<prefix>` is a conflict before anything is
+ * read: the Bypass app must keep the bare prefix if `<domain>/<prefix>/` is taken out again.
  */
 async function planBypass({ cf }, { repo, prefix, config, publicPaths }) {
+  const app = (state, summary, extra = {}) => ({ step: "access", kind: "bypass-app", state, summary, ...extra });
+  if (publicPaths.includes(`${prefix}/`) && !publicPaths.includes(prefix)) {
+    return [app("conflict", `public path ${prefix}/ is only accepted alongside ${prefix}: if the check fails, apply takes ${config.domain}${prefix}/ out of the Bypass app again, and the app must have ${config.domain}${prefix} left to keep; add --public-path ${prefix}, or drop --public-path ${prefix}/`)];
+  }
   const uris = publicDestinations(config.domain, publicPaths);
   const name = `${repo.split("/")[1]} (public)`;
   const policies = await listAccessPolicies(cf);
   const apps = await listAccessApps(cf);
-  const app = (state, summary, extra = {}) => ({ step: "access", kind: "bypass-app", state, summary, ...extra });
   // An Access destination with no path covers the whole host, as a route `<host>/*` would.
   const relations = (a) => appUris(a).map((uri) => classifyRoute(uri.includes("/") ? uri : `${uri}/*`, config.domain, prefix));
   const bypasses = (a) => appPolicies(a, policies).some((p) => p.decision === "bypass");
@@ -200,6 +230,16 @@ async function planBypass({ cf }, { repo, prefix, config, publicPaths }) {
       appActions.push(everyoneOnly(a)
         ? app("ok", `Bypass app "${a.name}" lets anyone reach ${uris.join(" + ")}`, { name: a.name })
         : app("conflict", `Access app "${a.name}" holds exactly the public paths but is not Bypass for Everyone; ${NEVER_MOVE}`));
+    } else if (a.name === name && !exact && held.length > 0 && held.every((uri) => uris.includes(uri))) {
+      const missing = uris.filter((uri) => !held.includes(uri));
+      const refusal = everyoneOnly(a) ? putRefusal(a) : "it is not Bypass for Everyone";
+      appActions.push(refusal
+        ? app("conflict", `Access app "${a.name}" holds [${held.join(", ")}], some of the public paths, but ${refusal}, so the tool cannot add ${missing.join(" + ")}; add them by hand`)
+        : app("ok", `Bypass app "${a.name}" lets anyone reach ${held.join(" + ")}`, { name: a.name }));
+      if (!refusal) {
+        appActions.push({ step: "access", kind: "bypass-app-add", state: "create", name: a.name, appId: a.id, held, uris: missing,
+          summary: `add public destination(s) ${missing.join(" + ")} to Bypass app "${a.name}" (anyone, no sign-in)` });
+      }
     } else if (a.name === name) {
       appActions.push(app("conflict", `Access app "${a.name}" holds [${held.join(", ")}], not exactly the public paths [${uris.join(", ")}]; ${NEVER_MOVE}`));
     } else if (shared.length > 0) {
@@ -210,7 +250,7 @@ async function planBypass({ cf }, { repo, prefix, config, publicPaths }) {
       appActions.push(app("info", `Bypass app "${a.name}" on [${held.join(", ")}] is broader than ${prefix}; the app's own destinations are more specific and win under it — left alone`));
     }
   }
-  if (exact || appActions.some((x) => x.state === "conflict")) return appActions;
+  if (exact || appActions.some((x) => x.state === "conflict" || x.kind === "bypass-app-add")) return appActions;
 
   const policy = pickReusablePolicy(policies, PUBLIC_POLICY_NAME);
   const policyAction = !policy
@@ -228,7 +268,13 @@ async function planBypass({ cf }, { repo, prefix, config, publicPaths }) {
   ];
 }
 
-/** Mixed apps only: which app answers each listed destination, and the rest of the prefix. */
+/**
+ * Mixed apps only: which app answers each listed destination, and the rest of the prefix.
+ * A public `<prefix>/` gets one more line for the paths under it: they are meant for the
+ * Allow app's `<prefix>/*`, but a destination covers its subpaths too, and the docs do not
+ * say whether `<prefix>/` or `<prefix>/*` is the more specific, so apply checks a child.
+ * The line promises to take `<domain>/<prefix>/` out again only when this plan adds it.
+ */
 function planCoverage(actions, { prefix, config, publicPaths }) {
   const line = (summary) => ({ step: "access", kind: "coverage", state: "info", summary });
   if (actions.some((a) => a.step === "access" && a.state === "conflict")) {
@@ -237,6 +283,10 @@ function planCoverage(actions, { prefix, config, publicPaths }) {
   const allow = actions.find((a) => a.kind === "app")?.name;
   const bypass = actions.find((a) => a.kind === "bypass-app" && a.state !== "info")?.name;
   const rest = `${config.domain}${prefix}/*`;
+  const slash = `${config.domain}${prefix}/`;
+  const onExposedChild = actions.some((a) => addsSlashDestination(a, slash))
+    ? `takes ${slash} out again if one answers signed out`
+    : `reports one that answers signed out; this run does not add ${slash}, so it removes nothing`;
   const base = privateDestinations(config.domain, prefix, publicPaths);
   const allowLine = (uri, note = "") => line(`  ${uri}${note} → "${allow}" — Allow, sign-in`);
   return [
@@ -245,6 +295,9 @@ function planCoverage(actions, { prefix, config, publicPaths }) {
     ...base.filter((uri) => uri !== rest).map((uri) => allowLine(uri)),
     ...narrowingDestinations(config.domain, prefix, publicPaths).map((uri) => allowLine(uri, " (narrowing)")),
     ...base.filter((uri) => uri === rest).map((uri) => allowLine(uri, " (the rest)")),
+    ...(publicPaths.includes(`${prefix}/`)
+      ? [line(`  ${config.domain}${prefix}/<child> → "${allow}" (by ${rest}) — Allow, sign-in; ${slash} covers its subpaths too and the docs do not rank it against ${rest}, so apply checks a child and ${onExposedChild}`)]
+      : []),
   ];
 }
 
@@ -465,26 +518,62 @@ export function formatPlan(actions, { repo, prefix, apply, public: isPublic, pub
 }
 
 /**
- * Adds the planned narrowing destinations to the existing Allow app. The app is read
- * again first, and an app whose paths changed since the plan is refused, since PUT
- * replaces the whole app with what is sent.
+ * The existing app a plan adds destinations to (narrowing ones to the Allow app, public
+ * ones to the Bypass app), read again. An app whose paths changed since the plan is
+ * refused, since PUT replaces the whole app with what is sent. Writes nothing.
  */
-async function addNarrowingDestinations(cf, { appId, name, held, uris }) {
+async function readPlannedApp(cf, { appId, name, held }) {
   const current = await getAccessApp(cf, appId);
   if (!sameSet(appUris(current), held)) {
     throw new Error(`Access app "${name}" now guards [${appUris(current).join(", ")}], not [${held.join(", ")}] as planned; re-run the plan`);
   }
+  return current;
+}
+
+/** Sends `current` back with the planned destinations added, and checks the answer holds them all. */
+async function putAddedDestinations(cf, { appId, name, held, uris }, current) {
   const updated = await updateAccessApp(cf, appId, withAddedDestinations(current, uris));
   const lost = [...held, ...uris].filter((uri) => !appUris(updated ?? {}).includes(uri));
   if (lost.length > 0) throw new Error(`Access app "${name}" was updated but does not guard ${lost.join(" + ")}; check it in the Zero Trust dashboard`);
 }
 
 /**
+ * Takes `slash` (`<domain>/<prefix>/`) out of the Bypass app this run put it in, or may
+ * have put it in, after the run failed. The app is read again and, only if it holds that
+ * destination, sent back with it alone removed, so everything else it holds stays; the
+ * plan made sure that includes the bare prefix. Returns one sentence saying what happened.
+ */
+async function removeSlashDestination(cf, { appId, name }, slash) {
+  const current = await getAccessApp(cf, appId);
+  const held = appUris(current);
+  if (!held.includes(slash)) {
+    return `Bypass app "${name}" does not hold ${slash}, so nothing was removed; it guards ${held.join(" + ")}, check it in the Zero Trust dashboard now`;
+  }
+  const kept = held.filter((uri) => uri !== slash);
+  const now = appUris((await updateAccessApp(cf, appId, withoutDestination(current, slash))) ?? {});
+  if (now.includes(slash)) {
+    return `tried to remove ${slash} from Bypass app "${name}", but it still holds it; remove it in the Zero Trust dashboard now`;
+  }
+  if (!sameSet(now, kept)) {
+    return `removed ${slash} from Bypass app "${name}", but it now guards [${now.join(", ")}], not [${kept.join(", ")}]; check it in the Zero Trust dashboard now`;
+  }
+  return `removed ${slash} from Bypass app "${name}", which keeps ${kept.join(" + ")}`;
+}
+
+/**
  * Carries out the "create" actions in plan order. Refuses while any conflict stands.
  * Private: Access first, and nothing else until the path redirects to the Access login.
  * Mixed: the Allow app (or the narrowing destinations added to the existing one), then
- * the Bypass app, and nothing else until the private paths redirect to the login and the
- * public ones answer signed out.
+ * the Bypass app (or the public destinations added to the existing one), and nothing else
+ * until the private paths redirect to the login and the public ones answer signed out. A
+ * failed check leaves what the run created in place. Only a run that adds
+ * `<domain>/<prefix>/` does more: a private path that asked for sign-in before that
+ * destination was added and answers signed out after it stops the wait at once, and on
+ * any failed check that one destination is taken out again (see `removeSlashDestination`)
+ * and the check is run once more without it. The same happens when the write that adds it
+ * to an existing Bypass app fails, since a write can go through and still fail. A failed
+ * create of a Bypass app holding it has no app id to work with, so its error says the app
+ * may exist and must be checked.
  * Public: no Access step and no login wait; Cloudflare resources, then GitHub.
  */
 export async function applyBootstrap({ cf, run, fetch, sleep, log }, actions, { prefix, repo, config, public: isPublic, publicPaths = [] }) {
@@ -496,7 +585,32 @@ export async function applyBootstrap({ cf, run, fetch, sleep, log }, actions, { 
   let databaseId = actions.find((a) => a.kind === "d1-database" || a.kind === "d1-config")?.databaseId ?? null;
 
   if (!isPublic) {
+    const slash = `${config.domain}${prefix}/`;
+    const slashApps = []; // the Bypass app(s) this run puts `slash` in, or may have: [{ appId, name }]
+    let mustStayPrivate = [];
+    const failures = (result) => result.results.filter((r) => !r.ok).map((r) => `${r.url} ${r.reason}`).join("; ");
+    /** The error for a run that failed after it may have made `slash` public: takes it out again, checks without it, reports all three. */
+    const rollbackError = async (failed, why) => {
+      log(`  ! ${why}; taking ${slash} out again`);
+      const done = [];
+      try {
+        for (const app of slashApps) done.push(await removeSlashDestination(cf, app, slash));
+      } catch (err) {
+        return new Error(`${failed}. Taking ${slash} out again failed (${err.message}); check ${slashApps.map((a) => `"${a.name}"`).join(", ")} in the Zero Trust dashboard now`);
+      }
+      for (const step of done) log(`  - ${step}`);
+      const recheck = await waitForAccess({ fetch, domain: config.domain, prefix, team: config.team,
+        publicPaths: publicPaths.filter((p) => p !== `${prefix}/`), sleep });
+      const after = recheck.ok ? "the site passes the check" : `the site still fails the check: ${failures(recheck)}`;
+      return new Error(`${failed}. Rollback: ${done.join("; ")}. Without ${prefix}/ listed, ${after}`);
+    };
     for (const action of actions.filter((a) => a.step === "access" && a.state === "create")) {
+      const addsSlash = addsSlashDestination(action, slash);
+      if (addsSlash && slashApps.length === 0) {
+        // What asks for sign-in before `slash` is public; the wait stops at once if one stops asking.
+        const before = await verifyPath({ fetch, domain: config.domain, prefix, team: config.team, publicPaths });
+        mustStayPrivate = before.results.filter((r) => r.expect === "access" && r.ok).map((r) => r.url);
+      }
       if (action.kind === "policy") {
         const include = action.emails.map((email) => ({ email: { email } }));
         policyId = (await createReusablePolicy(cf, { name: action.name, decision: "allow", include })).id;
@@ -505,19 +619,38 @@ export async function applyBootstrap({ cf, run, fetch, sleep, log }, actions, { 
         await createSelfHostedApp(cf, { name: action.name, uris: action.uris, policyId });
         log(`  + created Access app "${action.name}"`);
       } else if (action.kind === "app-narrowing") {
-        await addNarrowingDestinations(cf, action);
+        await putAddedDestinations(cf, action, await readPlannedApp(cf, action));
         log(`  + added narrowing destination(s) ${action.uris.join(" + ")} to Access app "${action.name}"`);
       } else if (action.kind === "bypass-policy") {
         bypassPolicyId = (await createReusablePolicy(cf, { name: action.name, decision: "bypass", include: [{ everyone: {} }] })).id;
         log(`  + created reusable policy "${action.name}" (bypass: everyone)`);
       } else if (action.kind === "bypass-app") {
-        await createSelfHostedApp(cf, { name: action.name, uris: action.uris, policyId: bypassPolicyId });
+        const app = await createSelfHostedApp(cf, { name: action.name, uris: action.uris, policyId: bypassPolicyId }).catch((err) => {
+          if (!addsSlash) throw err;
+          throw new Error(`creating Bypass app "${action.name}" failed: ${err.message}. The app may exist all the same, holding ${slash}, and without its id this run cannot take that out again; check for it in the Zero Trust dashboard now`);
+        });
+        if (addsSlash) slashApps.push({ appId: app.id, name: action.name });
         log(`  + created Bypass app "${action.name}"`);
+      } else if (action.kind === "bypass-app-add") {
+        const current = await readPlannedApp(cf, action);
+        if (addsSlash) slashApps.push({ appId: action.appId, name: action.name });
+        try {
+          await putAddedDestinations(cf, action, current);
+        } catch (err) {
+          if (!addsSlash) throw err;
+          throw await rollbackError(`adding ${action.uris.join(" + ")} to Bypass app "${action.name}" failed: ${err.message}`,
+            `the write that adds ${slash} to Bypass app "${action.name}" failed, and may have gone through all the same`);
+        }
+        log(`  + added public destination(s) ${action.uris.join(" + ")} to Bypass app "${action.name}"`);
       }
     }
-    const check = await waitForAccess({ fetch, domain: config.domain, prefix, team: config.team, publicPaths, sleep });
+    const check = await waitForAccess({ fetch, domain: config.domain, prefix, team: config.team, publicPaths, mustStayPrivate, sleep });
     if (!check.ok) {
-      throw new Error(`Access is not answering for ${prefix}: ${check.results.filter((r) => !r.ok).map((r) => `${r.url} ${r.reason}`).join("; ")}`);
+      const failed = `Access is not answering for ${prefix}: ${failures(check)}`;
+      if (slashApps.length === 0) throw new Error(failed);
+      throw await rollbackError(failed, check.exposed
+        ? `${check.exposed.join(", ")} asked for sign-in before this run and answer(s) signed out now, so the wait stopped at once`
+        : `the check failed after this run made ${slash} public`);
     }
     log(publicPaths.length > 0
       ? `  ✓ ${prefix} redirects to ${config.team}.cloudflareaccess.com, and its ${publicPaths.length} public path(s) answer signed out`

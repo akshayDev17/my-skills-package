@@ -3,12 +3,13 @@
 // Planning makes read calls only: Cloudflare GETs, `gh api` reads, `git remote`, and a
 // keychain existence check. The plan is plain data — one action per thing that exists
 // or must be created — so the same records drive the printout, the conflict refusal and
-// the apply loop. Apply refuses outright while any conflict stands, and then creates
-// only the actions marked "create", which is what makes a re-run a no-op.
+// the apply loop. Apply refuses outright while any conflict stands, and then carries out
+// only the actions marked "create" (and "delete", the old routes a public app's new one
+// replaces), which is what makes a re-run a no-op.
 //
 // A private app (the default) gets its Access app first and nothing else is touched
 // until the path answers with the Access login. A public app (`--public`, never
-// inferred) skips Access entirely and gets Worker routes for its prefix instead; it
+// inferred) skips Access entirely and gets the Worker route `<domain><prefix>*` instead; it
 // refuses a path that already has Access protection rather than removing it.
 //
 // A mixed app (`--public-path`, repeatable, never inferred) is a private app plus one
@@ -39,8 +40,9 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   accessDestinations, allowDestinations, classifyRoute, narrowingDestinations, privateDestinations, publicDestinations,
+  workerRoute,
 } from "./prefix.mjs";
-import { verifyPath, waitForAccess } from "./verify.mjs";
+import { verifyPath, waitForAccess, waitForRoutes } from "./verify.mjs";
 import {
   appPolicies,
   appUris,
@@ -49,6 +51,7 @@ import {
   createReusablePolicy,
   createSelfHostedApp,
   createWorkerRoute,
+  deleteWorkerRoute,
   findAppsTouching,
   findD1,
   findR2Bucket,
@@ -244,7 +247,7 @@ async function planBypass({ cf }, { repo, prefix, config, publicPaths }) {
       appActions.push(app("conflict", `Access app "${a.name}" holds [${held.join(", ")}], not exactly the public paths [${uris.join(", ")}]; ${NEVER_MOVE}`));
     } else if (shared.length > 0) {
       appActions.push(app("conflict", `${shared.join(" + ")} already belong(s) to Access app "${a.name}" [${held.join(", ")}]; ${NEVER_MOVE}`));
-    } else if (bypasses(a) && relations(a).some((r) => r === "exact" || r === "inside" || r === "straddles")) {
+    } else if (bypasses(a) && relations(a).some((r) => r === "exact" || r === "pair" || r === "inside" || r === "straddles")) {
       appActions.push(app("conflict", `Bypass app "${a.name}" lets anyone reach [${held.join(", ")}], more of ${prefix} than the public paths [${uris.join(", ")}]; narrow or remove it by hand`));
     } else if (bypasses(a) && relations(a).includes("broader")) {
       appActions.push(app("info", `Bypass app "${a.name}" on [${held.join(", ")}] is broader than ${prefix}; the app's own destinations are more specific and win under it — left alone`));
@@ -386,11 +389,14 @@ async function planR2({ cf }, clone) {
 }
 
 /**
- * Public apps only: the Worker named in the clone's wrangler.jsonc gets exactly
- * `<domain>/<prefix>` and `<domain>/<prefix>/*`. Any other route that reaches into the
- * prefix — owned by another Worker, by none, or by this Worker but spilling outside
- * the prefix — is a conflict. Broader routes of other Workers (the home `/*`) are left
- * alone: the app's longer patterns are more specific, so they win under the prefix.
+ * Public apps only: the Worker named in the clone's wrangler.jsonc gets exactly one route,
+ * `<domain><prefix>*` (see `workerRoute`: only a pattern ending in `*` matches
+ * `/<prefix>?<query>`). That Worker's old exact pair `<domain><prefix>` + `<domain><prefix>/*`
+ * is replaced: once `<prefix>*` exists, each is deleted. Any other route that reaches into
+ * the prefix — owned by another Worker, by none, or by this Worker but spilling outside
+ * the prefix — is a conflict, another Worker's `<prefix>*` included. Broader routes of
+ * other Workers (the home `/*`) are left alone, and so are routes on sibling paths such as
+ * `<domain><prefix>-old/*`: both lose to the more specific pattern on their own paths.
  */
 async function planRoutes({ cf }, { prefix, config }, clone) {
   const action = (state, summary, extra = {}) => ({ step: "route", kind: "route", state, summary, ...extra });
@@ -399,7 +405,7 @@ async function planRoutes({ cf }, { prefix, config }, clone) {
   if (typeof script !== "string" || script === "") {
     return [action("conflict", `${clone.wranglerPath} has no "name"; the routes need the Worker's name`)];
   }
-  const patterns = accessDestinations(config.domain, prefix);
+  const pattern = workerRoute(config.domain, prefix);
 
   const zone = await readWithScope(SCOPES.zone, `read zone ${config.domain}`, () => findZone(cf, config.domain));
   if (zone.denied) return [action("conflict", zone.denied)];
@@ -411,37 +417,74 @@ async function planRoutes({ cf }, { prefix, config }, clone) {
   if (routes.denied) return [action("conflict", routes.denied)];
 
   const actions = [];
-  const present = [];
+  const replaced = [];
+  let present = false;
   for (const route of routes.value) {
     const relation = classifyRoute(route.pattern, config.domain, prefix);
     if (!relation) continue;
     const ours = route.script === script;
     const target = route.script ? `Worker "${route.script}"` : "no Worker";
     if (relation === "exact" && ours) {
-      present.push(route.pattern.endsWith("*") ? patterns[1] : patterns[0]);
-      actions.push(action("ok", `route ${route.pattern} → ${target}`));
+      present = true;
+      actions.push(action("ok", `route ${route.pattern} → ${target}`, { ownRoute: true }));
+    } else if (relation === "pair" && ours) {
+      replaced.push(route);
     } else if (relation === "inside" && ours) {
       actions.push(action("ok", `route ${route.pattern} → ${target} sits inside ${prefix}`));
     } else if (relation === "broader" && !ours) {
-      actions.push(action("info", `route ${route.pattern} → ${target} is broader; the app's routes are more specific and win under ${prefix} — left alone`));
+      actions.push(action("info", `route ${route.pattern} → ${target} is broader; the app's route is more specific and wins under ${prefix} — left alone`));
+    } else if (relation === "sibling") {
+      actions.push(action("info", `route ${route.pattern} → ${target} is on a path outside ${prefix} that ${pattern} also matches; it is more specific and keeps that path — left alone`));
     } else if (ours) {
-      actions.push(action("conflict", `route ${route.pattern} → ${target} reaches outside ${prefix}, but an app claims only ${patterns.join(" + ")}; fix it by hand`));
+      actions.push(action("conflict", `route ${route.pattern} → ${target} reaches outside ${prefix}, but an app claims only ${pattern}; fix it by hand`));
     } else {
-      actions.push(action("conflict", `route ${route.pattern} → ${target} overlaps ${patterns.join(" + ")}; fix or remove it by hand`));
+      actions.push(action("conflict", `route ${route.pattern} → ${target} overlaps ${pattern}; fix or remove it by hand`));
     }
   }
 
-  const missing = patterns.filter((p) => !present.includes(p));
-  if (missing.length === 0) return actions;
+  const replacements = replaced.map((route) => action("delete",
+    `delete route ${route.pattern} → Worker "${script}" once ${pattern} answers: ${pattern} replaces it (a route without a final * misses ${prefix}?<query>)`,
+    { kind: "route-delete", pattern: route.pattern, routeId: route.id, zoneId }));
+  if (present) return [...actions, ...replacements];
   const deployed = await readWithScope(SCOPES.scripts, "list Worker scripts", () => workerExists(cf, script));
   if (deployed.denied) return [...actions, action("conflict", deployed.denied)];
   if (!deployed.value) {
     return [...actions, action("info",
-      `Worker "${script}" is not deployed yet, and a route can only name a deployed Worker — re-run with --public after its first deploy to add ${missing.join(" + ")}`,
+      `Worker "${script}" is not deployed yet, and a route can only name a deployed Worker — re-run with --public after its first deploy to add ${pattern}`,
       { later: true })];
   }
-  return [...actions, ...missing.map((pattern) =>
-    action("create", `create route ${pattern} → Worker "${script}" (publicly reachable)`, { pattern, script, zoneId }))];
+  return [...actions,
+    action("create", `create route ${pattern} → Worker "${script}" (publicly reachable; the Worker must pass paths outside ${prefix} to the origin)`, { pattern, script, zoneId, ownRoute: true }),
+    ...replacements];
+}
+
+/**
+ * The route actions of a public plan whose `<prefix>*` exists or is planned: creates it if
+ * planned, then waits until the route check passes (`/<prefix>?<query>` reaches the app,
+ * `/<prefix><sibling>` the origin), and only then deletes the old routes it replaces. The
+ * check runs on every apply, so a re-run after a failed one cannot pass without it. A failed
+ * check deletes nothing and keeps `<prefix>*`: the old routes still point at the same
+ * Worker, so the app keeps answering where it did.
+ */
+async function applyRoutes({ cf, fetch, sleep, log }, routeActions, { prefix, config }) {
+  const route = workerRoute(config.domain, prefix);
+  const creates = routeActions.filter((a) => a.state === "create");
+  for (const action of creates) {
+    await createWorkerRoute(cf, action.zoneId, { pattern: action.pattern, script: action.script });
+    log(`  + created route ${action.pattern} → Worker "${action.script}"`);
+  }
+  const check = await waitForRoutes({ fetch, domain: config.domain, prefix, sleep });
+  const failures = check.results.filter((r) => !r.ok).map((r) => `${r.url} ${r.reason}`).join("; ");
+  const deletes = routeActions.filter((a) => a.state === "delete");
+  if (!check.ok) {
+    const kept = creates.length > 0 ? `${route} was created by this run and is kept live` : `${route} is still in place`;
+    throw new Error(`the Worker route ${route} does not answer as it should: ${failures}. ${kept}${deletes.length > 0 ? `; nothing was deleted: ${deletes.map((a) => a.pattern).join(" + ")} still point at the same Worker` : ""}`);
+  }
+  log(`  ✓ ${prefix}?<query> reaches the app, and ${prefix}portfolio-app-verify the origin`);
+  for (const action of deletes) {
+    await deleteWorkerRoute(cf, action.zoneId, action.routeId);
+    log(`  - deleted route ${action.pattern}, replaced by ${route}`);
+  }
 }
 
 function planGithub({ run }, { repo }) {
@@ -493,7 +536,7 @@ export async function planBootstrap(deps, opts) {
   ];
 }
 
-const MARK = { ok: "✓", create: "+", warn: "!", conflict: "✗", info: "·" };
+const MARK = { ok: "✓", create: "+", delete: "-", warn: "!", conflict: "✗", info: "·" };
 const HEADING = { access: "Cloudflare Access", d1: "D1", r2: "R2", route: "Worker routes", github: "GitHub" };
 const OPTIONAL_STEPS = ["r2", "route"];
 
@@ -507,7 +550,7 @@ export function formatPlan(actions, { repo, prefix, apply, public: isPublic, pub
     lines.push(step === "github" ? `${HEADING[step]} ${repo}` : HEADING[step]);
     for (const a of stepActions) lines.push(`  ${MARK[a.state]} ${a.summary}`);
   }
-  const creates = actions.filter((a) => a.state === "create").length;
+  const creates = actions.filter((a) => a.state === "create" || a.state === "delete").length;
   const conflicts = actions.filter((a) => a.state === "conflict").length;
   const later = actions.some((a) => a.later);
   lines.push(conflicts > 0 ? `${conflicts} conflict(s) — resolve them before --apply`
@@ -574,7 +617,8 @@ async function removeSlashDestination(cf, { appId, name }, slash) {
  * to an existing Bypass app fails, since a write can go through and still fail. A failed
  * create of a Bypass app holding it has no app id to work with, so its error says the app
  * may exist and must be checked.
- * Public: no Access step and no login wait; Cloudflare resources, then GitHub.
+ * Public: no Access step and no login wait; D1 and R2, then the Worker route (created,
+ * checked, and only then the old pair it replaces deleted; see `applyRoutes`), then GitHub.
  */
 export async function applyBootstrap({ cf, run, fetch, sleep, log }, actions, { prefix, repo, config, public: isPublic, publicPaths = [] }) {
   const conflicts = actions.filter((a) => a.state === "conflict");
@@ -657,7 +701,8 @@ export async function applyBootstrap({ cf, run, fetch, sleep, log }, actions, { 
       : `  ✓ ${prefix} redirects to ${config.team}.cloudflareaccess.com`);
   }
 
-  for (const action of actions.filter((a) => a.step !== "access" && a.state === "create")) {
+  const creates = (step) => actions.filter((a) => a.step === step && a.state === "create");
+  for (const action of [...creates("d1"), ...creates("r2")]) {
     if (action.kind === "d1-database") {
       databaseId = (await createD1(cf, action.name)).uuid;
       log(`  + created D1 database "${action.name}" (${databaseId})`);
@@ -667,10 +712,12 @@ export async function applyBootstrap({ cf, run, fetch, sleep, log }, actions, { 
     } else if (action.kind === "r2-bucket") {
       await createR2Bucket(cf, action.name);
       log(`  + created R2 bucket "${action.name}"`);
-    } else if (action.kind === "route") {
-      await createWorkerRoute(cf, action.zoneId, { pattern: action.pattern, script: action.script });
-      log(`  + created route ${action.pattern} → Worker "${action.script}"`);
-    } else if (action.kind === "gh-environment") {
+    }
+  }
+  const routeActions = actions.filter((a) => a.step === "route");
+  if (routeActions.some((a) => a.ownRoute)) await applyRoutes({ cf, fetch, sleep, log }, routeActions, { prefix, config });
+  for (const action of creates("github")) {
+    if (action.kind === "gh-environment") {
       ghCreateEnvironment(run, repo);
       log(`  + created environment ${GITHUB_ENVIRONMENT} on ${repo}`);
     } else if (action.kind === "gh-secret") {

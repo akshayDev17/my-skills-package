@@ -17,7 +17,8 @@
 //   D1                 GET/POST /accounts/{id}/d1/database
 //   R2                 GET /accounts/{id}/r2/buckets/{name}, POST /accounts/{id}/r2/buckets
 //   zones              GET /zones?name=<domain>
-//   Worker routes      GET/POST /zones/{zone_id}/workers/routes — `{ pattern, script }`
+//   Worker routes      GET/POST /zones/{zone_id}/workers/routes — `{ pattern, script }`;
+//                      DELETE /zones/{zone_id}/workers/routes/{route_id}
 //   Worker scripts     GET /accounts/{id}/workers/scripts — a route can only name a
 //                      deployed script (creating one for a missing script is refused)
 
@@ -185,6 +186,10 @@ export async function listWorkerRoutes(cf, zoneId) {
 export async function createWorkerRoute(cf, zoneId, { pattern, script }) {
   const json = await cfRequest(cf, "POST", `/zones/${zoneId}/workers/routes`, { pattern, script });
   return json.result;
+}
+
+export async function deleteWorkerRoute(cf, zoneId, routeId) {
+  await cfRequest(cf, "DELETE", `/zones/${zoneId}/workers/routes/${encodeURIComponent(routeId)}`);
 }
 
 export async function workerExists(cf, name) {

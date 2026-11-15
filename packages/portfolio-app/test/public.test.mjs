@@ -15,6 +15,8 @@ import {
 
 const REPO = "owner/election-atlas";
 const PREFIX = "/work/election-atlas";
+// The app's one Worker route, and the exact pair apps got before it (also the Access destinations).
+const ROUTE = `${DOMAIN}/work/election-atlas*`;
 const ROUTES = [`${DOMAIN}/work/election-atlas`, `${DOMAIN}/work/election-atlas/*`];
 
 function harness(world) {
@@ -30,13 +32,24 @@ const creates = (actions) => actions.filter((a) => a.state === "create").map((a)
 const writes = (calls) => calls.filter((c) => c.method !== "GET");
 const accessCalls = (calls) => calls.filter((c) => c.url.includes("/access/"));
 
+/** The app's Worker is deployed and, as it must, passes every path outside its prefix to the origin. */
 function deployedWorld() {
   const world = freshPublicWorld();
   world.site.scripts.push("election-atlas");
+  world.site.workerPrefixes = { "election-atlas": PREFIX };
   return world;
 }
 
-test("public plan: says the path will be public, plans D1, R2, both routes and GitHub, and writes nothing", async () => {
+const apiCalls = (calls) => calls.filter((c) => c.url.startsWith("https://api.cloudflare.com/"))
+  .map((c) => `${c.method} ${new URL(c.url).pathname.replace(`/client/v4/accounts/${ACCOUNT}`, "").replace("/client/v4", "")}`);
+const siteProbes = (calls) => calls.filter((c) => !c.url.startsWith("https://api.cloudflare.com/")).map((c) => c.url);
+const ROUTE_PROBES = [
+  `https://${DOMAIN}/work/election-atlas`,
+  `https://${DOMAIN}/work/election-atlas?portfolio-app-verify=1`,
+  `https://${DOMAIN}/work/election-atlasportfolio-app-verify`,
+];
+
+test("public plan: says the path will be public, plans D1, R2, the one <prefix>* route and GitHub, and writes nothing", async () => {
   const world = deployedWorld();
   const cloneDir = makeClone(WRANGLER_PUBLIC);
   const h = harness(world);
@@ -46,26 +59,27 @@ test("public plan: says the path will be public, plans D1, R2, both routes and G
     "d1-database:election-atlas",
     "d1-config",
     "r2-bucket:election-atlas-bills",
-    `route:${ROUTES[0]}`,
-    `route:${ROUTES[1]}`,
+    `route:${ROUTE}`,
     "gh-environment",
     "gh-secret:CLOUDFLARE_API_TOKEN",
     "gh-secret:CLOUDFLARE_ACCOUNT_ID",
   ]);
   assert.ok(!actions.some((a) => a.kind === "policy"), "no sign-in policy is planned");
+  assert.ok(!actions.some((a) => a.pattern === ROUTES[0] || a.pattern === ROUTES[1]), "the exact pair is no longer created");
 
   const text = formatPlan(actions, { ...opts(cloneDir), apply: false });
   assert.match(text, /^portfolio-app bootstrap owner\/election-atlas \/work\/election-atlas \(public: no Access sign-in\) — plan only/);
   assert.match(text, /! public app: example\.com\/work\/election-atlas \+ example\.com\/work\/election-atlas\/\* will be reachable by anyone — the Access sign-in step is skipped/);
-  assert.match(text, /\n {2}· route example\.com\/\* → Worker "home-site" is broader; the app's routes are more specific and win under \/work\/election-atlas — left alone/);
+  assert.match(text, /\n {2}· route example\.com\/\* → Worker "home-site" is broader; the app's route is more specific and wins under \/work\/election-atlas — left alone/);
   assert.match(text, /\nR2\n {2}\+ create R2 bucket "election-atlas-bills"\nWorker routes\n/);
+  assert.match(text, /\n {2}\+ create route example\.com\/work\/election-atlas\* → Worker "election-atlas" \(publicly reachable; the Worker must pass paths outside \/work\/election-atlas to the origin\)\n/);
 
   assert.deepEqual(writes(h.http.calls), [], "no Cloudflare write in plan mode");
   assert.ok(!h.http.calls.some((c) => c.url.includes("/access/policies")), "public plan does not even read policies");
   assert.equal(readFileSync(join(cloneDir, "backend", "wrangler.jsonc"), "utf8"), WRANGLER_PUBLIC);
 });
 
-test("public apply: Cloudflare resources first (D1, R2, routes), then GitHub; no Access call or login wait; re-run is a no-op", async () => {
+test("public apply: D1, R2, the route and its check, then GitHub; no Access call or login wait; re-run is a no-op", async () => {
   const world = deployedWorld();
   const cloneDir = makeClone(WRANGLER_PUBLIC);
   const h = harness(world);
@@ -74,25 +88,25 @@ test("public apply: Cloudflare resources first (D1, R2, routes), then GitHub; no
   await applyBootstrap(h.deps, actions, opts(cloneDir));
 
   const applyCalls = h.http.calls.slice(planCalls);
-  assert.deepEqual(applyCalls.map((c) => `${c.method} ${new URL(c.url).pathname.replace(`/client/v4/accounts/${ACCOUNT}`, "")}`), [
+  assert.deepEqual(apiCalls(applyCalls), [
     "POST /d1/database",
     "POST /r2/buckets",
-    "POST /client/v4/zones/zone-1/workers/routes",
-    "POST /client/v4/zones/zone-1/workers/routes",
-  ], "no Access write, and no probe of the site (no login wait)");
+    "POST /zones/zone-1/workers/routes",
+  ], "no Access write");
+  assert.deepEqual(siteProbes(applyCalls), ROUTE_PROBES, "the only probes are the route check's, once: no login wait");
   assert.deepEqual(accessCalls(writes(h.http.calls)), []);
   assert.deepEqual(h.logs.map((l) => l.trim().split(" ").slice(0, 4).join(" ")), [
     "+ created D1 database",
     "+ wrote database_id into",
     `+ created R2 bucket`,
-    `+ created route ${ROUTES[0]}`,
-    `+ created route ${ROUTES[1]}`,
+    `+ created route ${ROUTE}`,
+    "✓ /work/election-atlas?<query> reaches the",
     "+ created environment production",
     "+ set secret CLOUDFLARE_API_TOKEN",
     "+ set secret CLOUDFLARE_ACCOUNT_ID",
   ]);
 
-  assert.deepEqual(world.site.routes.filter((r) => r.script === "election-atlas").map((r) => r.pattern), ROUTES);
+  assert.deepEqual(world.site.routes.filter((r) => r.script === "election-atlas").map((r) => r.pattern), [ROUTE]);
   assert.deepEqual(world.site.r2.map((b) => b.name), ["election-atlas-bills"]);
   assert.deepEqual(world.site.apps, [], "no Access app");
   assert.deepEqual(world.site.policies, [], "no policy");
@@ -122,7 +136,7 @@ test("public, before the Worker's first deploy: routes wait for a re-run, everyt
 
   world.site.scripts.push("election-atlas");
   const afterDeploy = await planBootstrap(harness(world).deps, opts(cloneDir));
-  assert.deepEqual(creates(afterDeploy), ROUTES.map((r) => `route:${r}`));
+  assert.deepEqual(creates(afterDeploy), [`route:${ROUTE}`]);
 });
 
 test("public refuses a path that already has an Access app, and applies nothing", async () => {
@@ -152,13 +166,18 @@ test("public refuses routes that overlap the prefix unless they are the app's ow
   const cases = [
     [{ pattern: `${DOMAIN}/work/election-atlas/*`, script: "old-atlas" }, "conflict", /→ Worker "old-atlas" overlaps/],
     [{ pattern: `${DOMAIN}/work/election-atlas/api/*`, script: "someone-else" }, "conflict", /overlaps/],
-    [{ pattern: `${DOMAIN}/work/election-atlas*`, script: "election-atlas" }, "conflict", /reaches outside \/work\/election-atlas/],
+    [{ pattern: `${DOMAIN}/work/election-atlas*`, script: "election-atlas" }, "ok", /^route \S+ → Worker "election-atlas"$/],
+    [{ pattern: `${DOMAIN}/work/election-atlas*`, script: "someone-else" }, "conflict", /→ Worker "someone-else" overlaps example\.com\/work\/election-atlas\*/],
+    [{ pattern: `${DOMAIN}/work/election-atlas`, script: "someone-else" }, "conflict", /overlaps/],
+    [{ pattern: `*${DOMAIN}/work/election-atlas*`, script: "election-atlas" }, "conflict", /reaches outside \/work\/election-atlas, but an app claims only example\.com\/work\/election-atlas\*/],
     [{ pattern: `${DOMAIN}/work/*`, script: "election-atlas" }, "conflict", /reaches outside/],
     [{ pattern: `${DOMAIN}/work/election-atlas` }, "conflict", /→ no Worker overlaps/],
     [{ pattern: `*${DOMAIN}/work/election-atlas/*`, script: "someone-else" }, "conflict", /overlaps/],
     [{ pattern: `${DOMAIN}/work/election-atlas/api/*`, script: "election-atlas" }, "ok", /sits inside/],
     [{ pattern: `${DOMAIN}/work/*`, script: "portfolio" }, "info", /is broader/],
-    [{ pattern: `${DOMAIN}/work/election-atlas-old/*`, script: "someone-else" }, null, null],
+    [{ pattern: `${DOMAIN}/work/election-atlas-old/*`, script: "someone-else" }, "info", /outside \/work\/election-atlas that example\.com\/work\/election-atlas\* also matches; it is more specific and keeps that path — left alone/],
+    [{ pattern: `${DOMAIN}/work/election-atlasfoo`, script: "someone-else" }, "info", /is more specific and keeps that path/],
+    [{ pattern: `${DOMAIN}/work/election-atlas2` }, "info", /→ no Worker is on a path outside/],
     [{ pattern: `other.com/work/election-atlas/*`, script: "someone-else" }, null, null],
   ];
   for (const [route, state, summary] of cases) {
@@ -212,6 +231,118 @@ test("several r2_buckets names are a plan conflict", async () => {
   assert.match(r2.summary, /several buckets \(election-atlas-bills, election-atlas-maps\)/);
 });
 
+/** An app bootstrapped before `<prefix>*`: the Worker holds the exact pair. */
+function pairWorld() {
+  const world = deployedWorld();
+  world.site.routes.push(
+    { id: "route-exact", pattern: ROUTES[0], script: "election-atlas" },
+    { id: "route-slash", pattern: ROUTES[1], script: "election-atlas" },
+  );
+  return world;
+}
+
+test("public, the Worker's old exact pair: the plan creates <prefix>* and deletes the pair once it answers", async () => {
+  const world = pairWorld();
+  const cloneDir = makeClone(WRANGLER_PUBLIC);
+  const h = harness(world);
+  const actions = await planBootstrap(h.deps, opts(cloneDir));
+  const route = actions.filter((a) => a.step === "route" && a.state !== "info").map((a) => `${a.state} ${a.kind}:${a.pattern}`);
+  assert.deepEqual(route, [`create route:${ROUTE}`, `delete route-delete:${ROUTES[0]}`, `delete route-delete:${ROUTES[1]}`]);
+  assert.ok(!actions.some((a) => a.state === "conflict"), "the app's own old routes are not a conflict");
+  const text = formatPlan(actions, { ...opts(cloneDir), apply: false });
+  assert.match(text, /\n {2}- delete route example\.com\/work\/election-atlas → Worker "election-atlas" once example\.com\/work\/election-atlas\* answers: .* misses \/work\/election-atlas\?<query>\)\n/);
+  assert.match(text, /\n {2}- delete route example\.com\/work\/election-atlas\/\* → Worker "election-atlas" once/);
+  assert.deepEqual(writes(h.http.calls), [], "plan mode writes nothing");
+
+  const planCalls = h.http.calls.length;
+  await applyBootstrap(h.deps, actions, opts(cloneDir));
+  const applyCalls = apiCalls(h.http.calls.slice(planCalls)).filter((c) => c.includes("/workers/routes"));
+  assert.deepEqual(applyCalls, [
+    "POST /zones/zone-1/workers/routes",
+    "DELETE /zones/zone-1/workers/routes/route-exact",
+    "DELETE /zones/zone-1/workers/routes/route-slash",
+  ], "create first, delete after");
+  assert.deepEqual(world.site.routes.map((r) => r.pattern), [`${DOMAIN}/*`, ROUTE]);
+  assert.ok(h.logs.some((l) => l.trim() === `- deleted route ${ROUTES[0]}, replaced by ${ROUTE}`));
+
+  const again = await planBootstrap(harness(world).deps, opts(cloneDir));
+  assert.deepEqual(creates(again), []);
+  assert.ok(!again.some((a) => a.state === "delete"));
+});
+
+test("public, <prefix>* already there beside the old pair: the plan only deletes the pair", async () => {
+  const world = pairWorld();
+  world.site.routes.push({ id: "route-new", pattern: ROUTE, script: "election-atlas" });
+  const actions = await planBootstrap(harness(world).deps, opts(makeClone(WRANGLER_PUBLIC)));
+  const route = actions.filter((a) => a.step === "route").map((a) => `${a.state} ${a.pattern ?? a.summary}`);
+  assert.deepEqual(route.filter((r) => !r.startsWith("info")), [
+    `ok route ${ROUTE} → Worker "election-atlas"`,
+    `delete ${ROUTES[0]}`,
+    `delete ${ROUTES[1]}`,
+  ]);
+  assert.match(formatPlan(actions, { ...opts(makeClone(WRANGLER_PUBLIC)), apply: false }), /\d change\(s\) planned$/);
+});
+
+test("public apply stops before deleting anything or touching GitHub when the Worker serves paths outside its prefix", async () => {
+  const world = pairWorld();
+  delete world.site.workerPrefixes; // a Worker without the pass-through guard
+  const cloneDir = makeClone(WRANGLER_PUBLIC);
+  const h = harness(world);
+  const actions = await planBootstrap(h.deps, opts(cloneDir));
+  await assert.rejects(applyBootstrap(h.deps, actions, opts(cloneDir)),
+    /the Worker route example\.com\/work\/election-atlas\* does not answer as it should: https:\/\/example\.com\/work\/election-atlasportfolio-app-verify answered 200 without x-github-request-id — .*fetch\(req\)\. example\.com\/work\/election-atlas\* was created by this run and is kept live; nothing was deleted: example\.com\/work\/election-atlas \+ example\.com\/work\/election-atlas\/\* still point at the same Worker/);
+  assert.deepEqual(world.site.routes.map((r) => r.pattern), [`${DOMAIN}/*`, ROUTES[0], ROUTES[1], ROUTE]);
+  assert.equal(world.local.github.environment, false, "GitHub is not touched");
+});
+
+test("public apply re-run after a failed route check checks again and still stops before GitHub", async () => {
+  const world = deployedWorld();
+  delete world.site.workerPrefixes; // a new app whose Worker has no pass-through guard
+  const cloneDir = makeClone(WRANGLER_PUBLIC);
+  const h = harness(world);
+  await assert.rejects(applyBootstrap(h.deps, await planBootstrap(h.deps, opts(cloneDir)), opts(cloneDir)),
+    /election-atlas\* was created by this run and is kept live$/);
+  assert.equal(world.local.github.environment, false);
+
+  const rerun = harness(world);
+  const actions = await planBootstrap(rerun.deps, opts(cloneDir));
+  assert.ok(!actions.some((a) => a.step === "route" && a.state === "create"), "the route is already there");
+  await assert.rejects(applyBootstrap(rerun.deps, actions, opts(cloneDir)),
+    /does not answer as it should: .*election-atlasportfolio-app-verify .*\. example\.com\/work\/election-atlas\* is still in place$/);
+  assert.equal(world.local.github.environment, false, "GitHub is still not touched");
+
+  world.site.workerPrefixes = { "election-atlas": PREFIX }; // the Worker now passes outside paths on
+  const fixed = harness(world);
+  await applyBootstrap(fixed.deps, await planBootstrap(fixed.deps, opts(cloneDir)), opts(cloneDir));
+  assert.deepEqual(siteProbes(fixed.http.calls).slice(-3), ROUTE_PROBES, "the re-run probes the route before GitHub");
+  assert.equal(world.local.github.environment, true);
+});
+
+test("public apply keeps checking while the new route is not answering yet, then goes on", async () => {
+  const world = deployedWorld();
+  world.site.routes = []; // no home route: unrouted paths reach the origin, as on the real zone
+  const cloneDir = makeClone(WRANGLER_PUBLIC);
+  const h = harness(world);
+  const actions = await planBootstrap(h.deps, opts(cloneDir));
+  // The route reaches the edge only after two rounds of probes.
+  const created = [];
+  let probes = 0;
+  const fetch = async (url, init) => {
+    if (!url.startsWith("https://api.cloudflare.com/") && ++probes <= 6) {
+      const saved = world.site.routes;
+      world.site.routes = saved.filter((r) => !created.includes(r));
+      try { return await h.http.fetch(url, init); } finally { world.site.routes = saved; }
+    }
+    const res = await h.http.fetch(url, init);
+    if (init?.method === "POST" && url.endsWith("/workers/routes")) created.push(world.site.routes.at(-1));
+    return res;
+  };
+  const sleeps = [];
+  await applyBootstrap({ ...h.deps, cf: { ...h.deps.cf, fetch }, fetch, sleep: async (ms) => sleeps.push(ms) }, actions, opts(cloneDir));
+  assert.equal(sleeps.length, 2);
+  assert.equal(world.local.github.environment, true);
+});
+
 // --- CLI ---------------------------------------------------------------------------
 
 function cli(world, argv) {
@@ -244,7 +375,7 @@ test("cli --public --apply carries the plan out and never sends the setup token 
   const r = await cli(world, ["bootstrap", "--public", "--repo", REPO, "--path", PREFIX, "--clone", makeClone(WRANGLER_PUBLIC), "--config", writeConfig(), "--apply"]);
   assert.equal(r.code, 0, r.err);
   assert.match(r.out, /— applying/);
-  assert.equal(world.site.routes.length, 3);
+  assert.equal(world.site.routes.length, 2, "the home route and the app's one route");
   assert.deepEqual(accessCalls(writes(r.http.calls)), []);
   assert.ok(!r.proc.calls.some((c) => c.input === SETUP_TOKEN || c.args.includes(SETUP_TOKEN)));
 });

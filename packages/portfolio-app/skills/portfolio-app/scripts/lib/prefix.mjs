@@ -1,7 +1,8 @@
 // The one place that decides which path prefixes a sub-app may claim.
 //
 // Every sub-app of the site lives under its own prefix, and its Access app guards
-// exactly `<domain>/<prefix>` and `<domain>/<prefix>/*`. A prefix that is empty or
+// exactly `<domain>/<prefix>` and `<domain>/<prefix>/*` (a public app's Worker route is
+// the one `<domain>/<prefix>*`, see `workerRoute`). A prefix that is empty or
 // `/` would put the whole site behind one sub-app's login; one under
 // ai-chat-archive's site-wide `/api`, `/_next` or `/vendors` would lock the archive's
 // own assets and API behind another app's policy.
@@ -106,14 +107,31 @@ export function publicDestinations(domain, publicPaths) {
 }
 
 /**
+ * The one Worker route a public app's Worker gets: `<domain><prefix>*`. Cloudflare matches a
+ * route against the whole URL, query string included, and a pattern cannot hold a query, so
+ * only a pattern ending in `*` matches `/<prefix>?<query>`; the old exact `<domain><prefix>`
+ * never did, and those requests fell through to the zone's origin. `<prefix>*` also matches
+ * siblings such as `/<prefix>foo`, so the app's Worker must hand every path that is neither
+ * `/<prefix>` nor under `/<prefix>/` back to the origin with `fetch(req)`.
+ * Access is not widened with it: its destinations stay `accessDestinations`.
+ */
+export function workerRoute(domain, prefix) {
+  return `${domain}${prefix}*`;
+}
+
+/**
  * How an existing Worker route pattern relates to the paths an app at `prefix` claims
  * (`/<prefix>` and everything under it), on `domain`:
- *   "exact"    one of the app's own two patterns
- *   "inside"   matches only paths under the prefix
- *   "broader"  a wildcard ending above the prefix (such as the home `/*`); the app's
- *              longer patterns are more specific, so they win under the prefix
+ *   "exact"     the app's own `<domain><prefix>*` (see `workerRoute`)
+ *   "pair"      `<domain><prefix>` or `<domain><prefix>/*`, the two routes an app got before
+ *               `<prefix>*`, which replaces them
+ *   "inside"    matches only paths under the prefix
+ *   "broader"   a wildcard ending above the prefix (such as the home `/*`); the app's
+ *               longer pattern is more specific, so it wins under the prefix
  *   "straddles" matches paths both under the prefix and outside it, at its level
- *   null       never matches a path the app claims (or another host)
+ *   "sibling"   matches only paths outside the prefix that `<prefix>*` also matches
+ *               (`/<prefix>foo`, `/<prefix>-old/*`); it is more specific, so it keeps them
+ *   null        never matches a path the app's route matches (or another host)
  * A route pattern is `[scheme://]host/path`, with an optional `*` at the start of the
  * host and at the end of the path; nothing else is a wildcard.
  */
@@ -126,12 +144,14 @@ export function classifyRoute(pattern, domain, prefix) {
 
   const claimed = (p) => p === prefix || p.startsWith(`${prefix}/`);
   if (!path.endsWith("*")) {
-    if (!claimed(path)) return null;
-    return host === domain && path === prefix ? "exact" : "inside";
+    if (!claimed(path)) return path.startsWith(prefix) ? "sibling" : null;
+    return host === domain && path === prefix ? "pair" : "inside";
   }
   const base = path.slice(0, -1);
-  if (host === domain && base === `${prefix}/`) return "exact";
+  if (host === domain && base === prefix) return "exact";
+  if (host === domain && base === `${prefix}/`) return "pair";
   if (base.startsWith(`${prefix}/`)) return "inside";
   if (prefix.startsWith(base)) return base.length < prefix.length ? "broader" : "straddles";
+  if (base.startsWith(prefix)) return "sibling";
   return null;
 }

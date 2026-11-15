@@ -25,7 +25,9 @@ const USAGE = `usage:
       a Cloudflare Access app for the path, its D1 database id in backend/wrangler.jsonc,
       and the GitHub "production" environment secrets.
       --public makes the path reachable by anyone: no Access step; instead the R2 bucket
-      named in wrangler.jsonc and Worker routes for exactly /<prefix> and /<prefix>/*.
+      named in wrangler.jsonc and the one Worker route /<prefix>* (it replaces the Worker's
+      old /<prefix> + /<prefix>/* routes, which miss /<prefix>?<query>). The Worker must
+      pass every path outside /<prefix> and /<prefix>/… to the origin with fetch(req).
       --public-path (repeatable) makes a mixed app: signed in by default, plus a Bypass
       app "<repo name> (public)" on exactly the listed paths. Each is /<prefix>,
       /<prefix>/ (exactly the trailing-slash path, and only alongside /<prefix>),

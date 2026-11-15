@@ -14,7 +14,6 @@
 //                      links reusable policies, and reusable + inline are mutually exclusive.
 //                      GET/PUT /accounts/{id}/access/apps/{app_id} reads one app and
 //                      replaces it: PUT takes the app's full settings, not a patch.
-//                      DELETE on the same path deletes the app.
 //   D1                 GET/POST /accounts/{id}/d1/database
 //   R2                 GET /accounts/{id}/r2/buckets/{name}, POST /accounts/{id}/r2/buckets
 //   zones              GET /zones?name=<domain>
@@ -122,10 +121,6 @@ export async function updateAccessApp(cf, appId, app) {
   return (await cfRequest(cf, "PUT", `/accounts/${cf.accountId}/access/apps/${encodeURIComponent(appId)}`, app)).result;
 }
 
-export async function deleteAccessApp(cf, appId) {
-  return (await cfRequest(cf, "DELETE", `/accounts/${cf.accountId}/access/apps/${encodeURIComponent(appId)}`)).result;
-}
-
 /** A PUT body: `app`'s full settings with `destinations` in place, policies as `{ id, precedence }` links. */
 const withDestinations = (app, destinations) => ({
   ...app,
@@ -141,9 +136,15 @@ export function withAddedDestinations(app, uris) {
   return withDestinations(app, [...app.destinations, ...uris.map((uri) => ({ type: "public", uri }))]);
 }
 
-/** The opposite of `withAddedDestinations`: `app` with exactly the destinations `uris` taken out. */
-export function withoutDestinations(app, uris) {
-  return withDestinations(app, app.destinations.filter((d) => !uris.includes(d.uri)));
+/**
+ * `app`'s full settings with the one destination `uri` taken out, and at least one left.
+ * `domain` names the app's first destination when the tool creates it; if it named `uri`,
+ * it names the first that stays.
+ */
+export function withoutDestination(app, uri) {
+  const destinations = app.destinations.filter((d) => d.uri !== uri);
+  const rest = withDestinations(app, destinations);
+  return app.domain === uri ? { ...rest, domain: destinations[0].uri } : rest;
 }
 
 export async function findD1(cf, name) {

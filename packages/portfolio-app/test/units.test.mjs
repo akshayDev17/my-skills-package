@@ -5,7 +5,7 @@ import {
   privateDestinations, publicDestinations,
 } from "../skills/portfolio-app/scripts/lib/prefix.mjs";
 import { checkAccessRedirect, checkSignedOutAnswer, mixedProbes, verifyPath, waitForAccess } from "../skills/portfolio-app/scripts/lib/verify.mjs";
-import { appPolicies, isBypassEveryone, withAddedDestinations, withoutDestinations } from "../skills/portfolio-app/scripts/lib/cloudflare.mjs";
+import { appPolicies, isBypassEveryone, withAddedDestinations, withoutDestination } from "../skills/portfolio-app/scripts/lib/cloudflare.mjs";
 import { D1_PLACEHOLDER, d1Target, parseJsonc, r2Target, replacePlaceholder } from "../skills/portfolio-app/scripts/lib/wrangler-config.mjs";
 import { parseConfig, repoFromRemote } from "../skills/portfolio-app/scripts/lib/local.mjs";
 import { ACCESS_LOGIN, DOMAIN, TEAM, WRANGLER_WITH_PLACEHOLDER, fakeFetch } from "./helpers.mjs";
@@ -208,17 +208,17 @@ test("waitForAccess stops at once when a probe that asked for sign-in before sto
   assert.equal(unreachable.exposed, undefined, "a request that failed is not an answer");
 });
 
-test("withoutDestinations takes out exactly the named destinations and keeps every other setting", () => {
+test("withoutDestination takes out exactly the named destination and keeps every other setting", () => {
   const app = {
     id: "a1", name: "x (public)", type: "self_hosted", session_duration: "24h",
     destinations: [{ type: "public", uri: "example.com/x" }, { type: "public", uri: "example.com/x/_next/*" }, { type: "public", uri: "example.com/x/" }],
     policies: [{ id: "p1", precedence: 1, decision: "bypass" }],
   };
-  assert.deepEqual(withoutDestinations(app, ["example.com/x/", "example.com/other"]), {
-    ...app,
-    destinations: [{ type: "public", uri: "example.com/x" }, { type: "public", uri: "example.com/x/_next/*" }],
-    policies: [{ id: "p1", precedence: 1 }],
-  });
+  const kept = { ...app, destinations: [{ type: "public", uri: "example.com/x" }, { type: "public", uri: "example.com/x/_next/*" }], policies: [{ id: "p1", precedence: 1 }] };
+  assert.deepEqual(withoutDestination(app, "example.com/x/"), kept);
+  assert.deepEqual(withoutDestination({ ...app, domain: "example.com/x" }, "example.com/x/"), { ...kept, domain: "example.com/x" });
+  assert.deepEqual(withoutDestination({ ...app, domain: "example.com/x/" }, "example.com/x/"), { ...kept, domain: "example.com/x" },
+    "a domain that named the removed destination names the first that stays");
 });
 
 test("pathCovers and privateDestinations: a public bare prefix leaves only <prefix>/* behind sign-in", () => {

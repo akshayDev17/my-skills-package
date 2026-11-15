@@ -98,7 +98,8 @@ not say whether `<prefix>/` or the Allow app's `<prefix>/*` is the more specific
 `<prefix>/<child>` (see the research notes). So the plan says the children are meant for the
 Allow app and that a child is checked, and `--apply` probes `<prefix>/portfolio-app-verify` and
 `<prefix>/api/portfolio-app-verify`, which must still redirect to the login. If they answer signed
-out, apply removes `<prefix>/` again (below).
+out, or the check fails in any other way, apply takes `<prefix>/` out of the public app again
+(step 5 below).
 
 ```sh
 # time-track: everything signed in except the landing page and its static assets
@@ -158,7 +159,7 @@ It plans one change, to the public app only:
   ·   example.com/time-track/_next/* → "time-track (public)" — Bypass, anyone
   ·   example.com/time-track/ → "time-track (public)" — Bypass, anyone
   ·   example.com/time-track/* (the rest) → "time-track (/time-track)" — Allow, sign-in
-  ·   example.com/time-track/<child> → "time-track (/time-track)" (by example.com/time-track/*) — Allow, sign-in; example.com/time-track/ covers its subpaths too and the docs do not rank it against example.com/time-track/*, so apply checks a child and removes what it made public if one answers signed out
+  ·   example.com/time-track/<child> → "time-track (/time-track)" (by example.com/time-track/*) — Allow, sign-in; example.com/time-track/ covers its subpaths too and the docs do not rank it against example.com/time-track/*, so apply checks a child and takes example.com/time-track/ out again if one answers signed out
 …
 1 change(s) planned
 ```
@@ -173,8 +174,9 @@ The Cloudflare Access step, in apply order:
    `<domain>/time-track/*`. An existing Allow app that holds the base destinations and some or
    none of the narrowing ones is reused, and the plan shows
    `+ add narrowing destination(s) … to "<app>"` for the missing ones. That is the one change the
-   tool makes to an existing app, because it only shrinks what is public. Apply reads the app
-   again, refuses if its destinations changed since the plan, and sends it back with `PUT` (which
+   tool makes to an existing Allow app, and it only shrinks what is public (the other change it
+   makes to an existing app is adding newly listed paths to the public app, step 3). Apply reads
+   the app again, refuses if its destinations changed since the plan, and sends it back with `PUT` (which
    replaces the whole app) carrying every current setting, the same policies by id and
    precedence, and only the missing destinations added. It never removes or alters any other
    destination, policy or setting. This comes before the Bypass app, so no child is ever public.
@@ -195,27 +197,30 @@ The Cloudflare Access step, in apply order:
    the Access login and every public path answers signed out (see `verify` below), and stops
    before D1 or GitHub if that never happens. The private probes include a child of each public
    path listed without a `/*`, so a run whose exact public paths open their children despite
-   the narrowing destinations stops here.
+   the narrowing destinations stops here, with both Access apps already in place; nothing is
+   removed for you (the one exception is a run that added `<prefix>/`, step 5).
    The two apps start answering at different moments, so the first round in which every probe
    passes may hold private answers taken before the Bypass app was live. That round is run
    again at once, and apply goes on only when the second run passes too. If the second run
    fails, the wait carries on like after any failed round, until a round and its second run
    both pass or the attempts run out.
-5. **Roll back what this run made public, if the wait fails.** This applies to every mixed
-   run that added public destinations: a new Bypass app, or new destinations on an existing
-   one. When the wait fails, apply removes exactly the destinations this run added from the
-   existing Bypass app (reading it again and sending it back with only those taken out), and
-   deletes a Bypass app this run created. Then it runs the wait again with the public paths
-   that were there before the run, and reports both: the original failure, each rollback step,
-   and whether the site now answers as before. It exits 1 either way, and D1 and GitHub are not
-   touched. It never removes anything that existed before the run. A Bypass app it created
-   that holds something else by then is left in place and reported for a hand fix. The Allow
-   app's changes and the `portfolio-app public` policy stay, since neither makes anything
-   public.
-   Before it adds the first public destination, apply records which private probes ask for
+5. **Take `<prefix>/` out again, if this run added it and the wait fails.** This applies only
+   to a run that added the trailing-slash destination `<domain>/<prefix>/`, to an existing
+   Bypass app or as part of one it created; no narrowing destination protects that path's
+   children, so a failed check may mean they are public. Apply reads the Bypass app again and
+   sends it back with only `<domain>/<prefix>/` taken out. Everything else the app holds stays,
+   no app is deleted, and nothing that existed before the run is removed. Then it runs the
+   wait again with the other public paths, and reports both: the original failure, what it
+   removed, and whether the site passes the check without `<prefix>/`. It exits 1 either way,
+   and D1 and GitHub are not touched. A Bypass app whose only destination is
+   `<domain>/<prefix>/` cannot lose it and stay an app, so it is left in place and the error
+   says to remove it by hand.
+   Before such a run adds `<domain>/<prefix>/`, apply records which private probes ask for
    sign-in. If one of those answers signed out during the wait, the run has made it public, so
-   the wait stops at once and the rollback starts, instead of leaving it public until the
+   the wait stops at once and the destination comes out, instead of staying public until the
    attempts run out.
+   Every other mixed run that fails the wait stops with `Access is not answering for <prefix>: …`
+   and leaves the apps it created in place for you to look at.
 
 D1 and GitHub follow as for a private app. Each step only fills in what is missing, so a mixed
 run on an app that already has its Allow app, D1 and secrets adds only the narrowing
@@ -513,8 +518,8 @@ security add-generic-password -s portfolio-app -a cloudflare-deploy-token -w
   narrowing destination cannot settle it, since `<prefix>/`'s would be `<prefix>/*` itself. So
   the tool relies on its probes. `<prefix>/portfolio-app-verify` and
   `<prefix>/api/portfolio-app-verify` must still redirect after `<prefix>/` is added. If they
-  answer signed out, the run removes `<prefix>/` again at once (step 5 of the mixed app's
-  Access step) and exits 1.
+  answer signed out, the run takes `<prefix>/` out of the Bypass app again at once (step 5 of
+  the mixed app's Access step) and exits 1. It removes that one destination and nothing else.
 - **Also documented, not used:** a public destination can carry `overrides:
   [{ "behavior": "public", "path_pattern" }]`, "Rules that override how Access handles requests to
   this destination. Each rule can make a matching path public, bypassing Access authentication",
@@ -523,11 +528,10 @@ security add-generic-password -s portfolio-app -a cloudflare-deploy-token -w
   guides do not describe it, only the API reference, so it is noted here and not used.
 - **Not confirmed against the live account:** whether `<prefix>/` actually wins for
   `<prefix>/` itself, and whether `<prefix>/*` wins for its children. The first `--apply` with
-  `/time-track/` will show both, and it rolls back if the children lose.
+  `/time-track/` will show both, and it takes `time-track/` out again if the children lose.
 - Sources:
   - [application paths](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/) (Unsupported URLs, Policy inheritance, Limitations)
   - [create app: `destinations[].uri` and `overrides[].path_pattern`](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/applications/methods/create/)
-  - [delete app](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/applications/methods/delete/)
   - [Gateway lists: URL slashes](https://developers.cloudflare.com/cloudflare-one/reusable-components/lists/), Gateway only
 
 ### R2 buckets and Worker routes (read 2026-11-02)

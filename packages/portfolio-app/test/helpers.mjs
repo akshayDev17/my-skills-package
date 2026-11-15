@@ -120,10 +120,6 @@ export function fakeFetch(state) {
       state.apps[appIndex] = { ...JSON.parse(init.body), id: state.apps[appIndex].id };
       return jsonResponse(200, { success: true, result: state.apps[appIndex] });
     }
-    if (oneApp && method === "DELETE") {
-      const [removed] = state.apps.splice(appIndex, 1);
-      return jsonResponse(200, { success: true, result: { id: removed.id } });
-    }
     if (path === `${base}/d1/database` && method === "GET") {
       const name = u.searchParams.get("name");
       return list(state.d1.filter((db) => !name || db.name.includes(name)));

@@ -21,15 +21,17 @@
 // by adding destinations: missing narrowing ones to the Allow app, which only shrinks what
 // is public, and newly listed public paths to the public app. It never removes or alters
 // a destination that was there before the run, or moves one out of an existing app, and
-// anything else in the way is a conflict. If the check fails after the run added public
-// destinations, apply removes exactly those again (deleting a Bypass app it created) and
-// checks once more, so a failed run does not leave anything more public than before.
+// anything else in the way is a conflict. A failed check leaves the apps the run created
+// in place for inspection.
 //
 // The prefix's trailing-slash path `/<prefix>/` is an exact public path like any other,
 // but it is the parent of every page under the prefix: a destination covers its subpaths,
 // and the docs do not say whether `<prefix>/` or the Allow app's `<prefix>/*` wins for
 // `<prefix>/<child>`. No narrowing destination can help (it would be `<prefix>/*` itself),
-// so the child probes and the rollback above are what keep the children behind sign-in.
+// so the child probes are what show the children still ask for sign-in. A run that added
+// `<domain>/<prefix>/` and then fails its check is the one case in which apply takes
+// something out again: that one destination, from the Bypass app the run put it in. It
+// then checks once more without it. Nothing else is removed, and no app is deleted.
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -45,7 +47,6 @@ import {
   createReusablePolicy,
   createSelfHostedApp,
   createWorkerRoute,
-  deleteAccessApp,
   findAppsTouching,
   findD1,
   findR2Bucket,
@@ -59,7 +60,7 @@ import {
   policyEmails,
   updateAccessApp,
   withAddedDestinations,
-  withoutDestinations,
+  withoutDestination,
   workerExists,
 } from "./cloudflare.mjs";
 import { D1_PLACEHOLDER, d1Target, parseJsonc, r2Target, replacePlaceholder } from "./wrangler-config.mjs";
@@ -119,7 +120,7 @@ function narrowingRefusal(app, policies) {
  * The Allow app. For a mixed app it holds the base destinations plus a narrowing
  * destination per exact public path (see prefix.mjs). An existing app holding the base
  * ones and only some of the narrowing ones gets the rest added: the one change the tool
- * makes to an existing app, because it only shrinks what is public.
+ * makes to an existing Allow app, and it only shrinks what is public.
  */
 async function planAccess({ cf }, { repo, prefix, config, publicPaths = [] }) {
   const actions = [];
@@ -280,7 +281,7 @@ function planCoverage(actions, { prefix, config, publicPaths }) {
     ...narrowingDestinations(config.domain, prefix, publicPaths).map((uri) => allowLine(uri, " (narrowing)")),
     ...base.filter((uri) => uri === rest).map((uri) => allowLine(uri, " (the rest)")),
     ...(publicPaths.includes(`${prefix}/`)
-      ? [line(`  ${config.domain}${prefix}/<child> → "${allow}" (by ${rest}) — Allow, sign-in; ${config.domain}${prefix}/ covers its subpaths too and the docs do not rank it against ${rest}, so apply checks a child and removes what it made public if one answers signed out`)]
+      ? [line(`  ${config.domain}${prefix}/<child> → "${allow}" (by ${rest}) — Allow, sign-in; ${config.domain}${prefix}/ covers its subpaths too and the docs do not rank it against ${rest}, so apply checks a child and takes ${config.domain}${prefix}/ out again if one answers signed out`)]
       : []),
   ];
 }
@@ -517,41 +518,23 @@ async function addDestinations(cf, { appId, name, held, uris }) {
 }
 
 /**
- * Undoes exactly what this run made public, after its check failed: the destinations it
- * added to an existing Bypass app come out of it again, and a Bypass app it created is
- * deleted. Nothing that was there before the run is touched: the other destinations stay,
- * and an app this run created that now holds something else is left for a hand fix. The
- * Allow app's changes and the Bypass policy stay; neither makes anything public.
- * Returns one sentence per step, then the re-check with the public paths that remain.
+ * Takes `slash` (`<domain>/<prefix>/`) out of the Bypass app this run added it to, after
+ * the run's check failed. The app is read again and sent back with only that destination
+ * removed, so everything else it holds stays. An app holding nothing else is left as it
+ * is, since an app needs a destination and the tool does not delete one. Returns one
+ * sentence saying what was done.
  */
-async function removeAddedPublicDestinations({ cf, fetch, sleep }, added, { prefix, config, publicPaths }) {
-  const done = [];
-  for (const { appId, name, uris, created } of added) {
-    const current = await getAccessApp(cf, appId);
-    const held = appUris(current);
-    if (created) {
-      if (!sameSet(held, uris)) {
-        done.push(`left Bypass app "${name}" in place: it now holds [${held.join(", ")}], not just the [${uris.join(", ")}] this run created it with; remove it by hand`);
-        continue;
-      }
-      await deleteAccessApp(cf, appId);
-      done.push(`deleted Bypass app "${name}", created by this run`);
-      continue;
-    }
-    const ours = uris.filter((uri) => held.includes(uri));
-    if (ours.length === 0) continue;
-    const kept = held.filter((uri) => !uris.includes(uri));
-    const updated = await updateAccessApp(cf, appId, withoutDestinations(current, ours));
-    if (!sameSet(appUris(updated ?? {}), kept)) {
-      done.push(`removed ${ours.join(" + ")} from Bypass app "${name}", but it now guards [${appUris(updated ?? {}).join(", ")}], not [${kept.join(", ")}]; check it in the Zero Trust dashboard`);
-      continue;
-    }
-    done.push(`removed ${ours.join(" + ")} from Bypass app "${name}", which keeps ${kept.join(" + ")}`);
+async function removeSlashDestination(cf, { appId, name }, slash) {
+  const current = await getAccessApp(cf, appId);
+  const kept = appUris(current).filter((uri) => uri !== slash);
+  if (kept.length === 0) {
+    return `left Bypass app "${name}" in place: ${slash} is its only destination, and the tool does not delete an app; remove it in the Zero Trust dashboard now`;
   }
-  const addedUris = added.flatMap((a) => a.uris);
-  const remaining = publicPaths.filter((p) => !addedUris.includes(`${config.domain}${p}`));
-  const recheck = await waitForAccess({ fetch, domain: config.domain, prefix, team: config.team, publicPaths: remaining, sleep });
-  return { done, recheck };
+  const updated = await updateAccessApp(cf, appId, withoutDestination(current, slash));
+  if (!sameSet(appUris(updated ?? {}), kept)) {
+    return `removed ${slash} from Bypass app "${name}", but it now guards [${appUris(updated ?? {}).join(", ")}], not [${kept.join(", ")}]; check it in the Zero Trust dashboard now`;
+  }
+  return `removed ${slash} from Bypass app "${name}", which keeps ${kept.join(" + ")}`;
 }
 
 /**
@@ -559,10 +542,12 @@ async function removeAddedPublicDestinations({ cf, fetch, sleep }, added, { pref
  * Private: Access first, and nothing else until the path redirects to the Access login.
  * Mixed: the Allow app (or the narrowing destinations added to the existing one), then
  * the Bypass app (or the public destinations added to the existing one), and nothing else
- * until the private paths redirect to the login and the public ones answer signed out. If
- * that check fails after this run added public destinations, they are removed again (see
- * `removeAddedPublicDestinations`), and a private path that asked for sign-in before
- * the run and answers signed out after it stops the wait at once.
+ * until the private paths redirect to the login and the public ones answer signed out. A
+ * failed check leaves what the run created in place. Only a run that added
+ * `<domain>/<prefix>/` does more: a private path that asked for sign-in before that
+ * destination was added and answers signed out after it stops the wait at once, and on
+ * any failed check that one destination is taken out again (see `removeSlashDestination`)
+ * and the check is run once more without it.
  * Public: no Access step and no login wait; Cloudflare resources, then GitHub.
  */
 export async function applyBootstrap({ cf, run, fetch, sleep, log }, actions, { prefix, repo, config, public: isPublic, publicPaths = [] }) {
@@ -574,11 +559,13 @@ export async function applyBootstrap({ cf, run, fetch, sleep, log }, actions, { 
   let databaseId = actions.find((a) => a.kind === "d1-database" || a.kind === "d1-config")?.databaseId ?? null;
 
   if (!isPublic) {
-    const added = []; // the public destinations this run adds: [{ appId, name, uris, created }]
+    const slash = `${config.domain}${prefix}/`;
+    const slashApps = []; // the Bypass app(s) this run adds `slash` to: [{ appId, name }]
     let mustStayPrivate = [];
     for (const action of actions.filter((a) => a.step === "access" && a.state === "create")) {
-      if ((action.kind === "bypass-app" || action.kind === "bypass-app-add") && added.length === 0) {
-        // What asks for sign-in before anything is made public; the wait stops at once if one stops asking.
+      const addsSlash = (action.kind === "bypass-app" || action.kind === "bypass-app-add") && action.uris.includes(slash);
+      if (addsSlash && slashApps.length === 0) {
+        // What asks for sign-in before `slash` is public; the wait stops at once if one stops asking.
         const before = await verifyPath({ fetch, domain: config.domain, prefix, team: config.team, publicPaths });
         mustStayPrivate = before.results.filter((r) => r.expect === "access" && r.ok).map((r) => r.url);
       }
@@ -597,33 +584,35 @@ export async function applyBootstrap({ cf, run, fetch, sleep, log }, actions, { 
         log(`  + created reusable policy "${action.name}" (bypass: everyone)`);
       } else if (action.kind === "bypass-app") {
         const app = await createSelfHostedApp(cf, { name: action.name, uris: action.uris, policyId: bypassPolicyId });
-        added.push({ appId: app.id, name: action.name, uris: action.uris, created: true });
+        if (addsSlash) slashApps.push({ appId: app.id, name: action.name });
         log(`  + created Bypass app "${action.name}"`);
       } else if (action.kind === "bypass-app-add") {
         await addDestinations(cf, action);
-        added.push({ appId: action.appId, name: action.name, uris: action.uris, created: false });
+        if (addsSlash) slashApps.push({ appId: action.appId, name: action.name });
         log(`  + added public destination(s) ${action.uris.join(" + ")} to Bypass app "${action.name}"`);
       }
     }
+    const failures = (result) => result.results.filter((r) => !r.ok).map((r) => `${r.url} ${r.reason}`).join("; ");
     const check = await waitForAccess({ fetch, domain: config.domain, prefix, team: config.team, publicPaths, mustStayPrivate, sleep });
     if (!check.ok) {
-      const failed = `Access is not answering for ${prefix}: ${check.results.filter((r) => !r.ok).map((r) => `${r.url} ${r.reason}`).join("; ")}`;
-      if (added.length === 0) throw new Error(failed);
+      const failed = `Access is not answering for ${prefix}: ${failures(check)}`;
+      if (slashApps.length === 0) throw new Error(failed);
       const why = check.exposed
         ? `${check.exposed.join(", ")} asked for sign-in before this run and answer(s) signed out now, so the wait stopped at once`
-        : "the check failed after this run made paths public";
-      log(`  ! ${why}; removing what this run made public`);
-      let rollback;
+        : `the check failed after this run made ${slash} public`;
+      log(`  ! ${why}; taking ${slash} out again`);
+      const done = [];
       try {
-        rollback = await removeAddedPublicDestinations({ cf, fetch, sleep }, added, { prefix, config, publicPaths });
+        for (const app of slashApps) done.push(await removeSlashDestination(cf, app, slash));
       } catch (err) {
-        throw new Error(`${failed}. Removing what this run made public failed (${err.message}); check ${added.map((a) => `"${a.name}"`).join(", ")} in the Zero Trust dashboard now`);
+        throw new Error(`${failed}. Taking ${slash} out again failed (${err.message}); check ${slashApps.map((a) => `"${a.name}"`).join(", ")} in the Zero Trust dashboard now`);
       }
-      const { done, recheck } = rollback;
       for (const step of done) log(`  - ${step}`);
-      const after = recheck.ok ? "the site answers as before this run"
-        : `the site still fails the check: ${recheck.results.filter((r) => !r.ok).map((r) => `${r.url} ${r.reason}`).join("; ")}`;
-      throw new Error(`${failed}. Rolled back: ${done.join("; ") || "nothing left to remove"}. After the rollback, ${after}`);
+      const recheck = await waitForAccess({ fetch, domain: config.domain, prefix, team: config.team,
+        publicPaths: publicPaths.filter((p) => p !== `${prefix}/`), sleep });
+      const after = recheck.ok ? `the site passes the check without ${prefix}/`
+        : `the site still fails the check without ${prefix}/: ${failures(recheck)}`;
+      throw new Error(`${failed}. Rolled back: ${done.join("; ")}. After the rollback, ${after}`);
     }
     log(publicPaths.length > 0
       ? `  ✓ ${prefix} redirects to ${config.team}.cloudflareaccess.com, and its ${publicPaths.length} public path(s) answer signed out`

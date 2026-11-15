@@ -7,7 +7,8 @@
 // method, path and Cloudflare's own error messages, never request headers.
 //
 // API shape (read 2026-10-31, see README "Research notes"):
-//   reusable policies  GET/POST /accounts/{id}/access/policies
+//   reusable policies  GET/POST /accounts/{id}/access/policies — `decision` is allow or
+//                      bypass here; Everyone is the include rule `{ everyone: {} }`
 //   applications       GET/POST /accounts/{id}/access/apps  — `destinations` supersedes
 //                      the deprecated `self_hosted_domains`; `policies: [{ id, precedence }]`
 //                      links reusable policies, and reusable + inline are mutually exclusive.
@@ -58,18 +59,34 @@ export async function cfListAll(cf, path, params = {}) {
 export const policyEmails = (policy) =>
   (policy.include ?? []).filter((rule) => rule.email?.email).map((rule) => rule.email.email);
 
+export const listAccessPolicies = (cf) => cfListAll(cf, `/accounts/${cf.accountId}/access/policies`, { per_page: "1000" });
+export const listAccessApps = (cf) => cfListAll(cf, `/accounts/${cf.accountId}/access/apps`, { per_page: "1000" });
+
+export const pickReusablePolicy = (policies, name) => policies.find((p) => p.name === name && p.reusable !== false) ?? null;
+
 export async function findReusablePolicy(cf, name) {
-  const policies = await cfListAll(cf, `/accounts/${cf.accountId}/access/policies`, { per_page: "1000" });
-  return policies.find((p) => p.name === name && p.reusable !== false) ?? null;
+  return pickReusablePolicy(await listAccessPolicies(cf), name);
 }
 
-export async function createReusablePolicy(cf, { name, emails }) {
-  const json = await cfRequest(cf, "POST", `/accounts/${cf.accountId}/access/policies`, {
-    name,
-    decision: "allow",
-    include: emails.map((email) => ({ email: { email } })),
-  });
+/** `include` is a list of Access rules, such as `{ email: { email } }` or `{ everyone: {} }`. */
+export async function createReusablePolicy(cf, { name, decision, include }) {
+  const json = await cfRequest(cf, "POST", `/accounts/${cf.accountId}/access/policies`, { name, decision, include });
   return json.result;
+}
+
+/** A policy that lets anyone through without signing in: Bypass, Everyone, nothing narrower. */
+export function isBypassEveryone(policy) {
+  return policy?.decision === "bypass" &&
+    (policy.include ?? []).some((rule) => rule.everyone) &&
+    (policy.require ?? []).length === 0 && (policy.exclude ?? []).length === 0;
+}
+
+/**
+ * An app's policies as full objects. The apps list carries them inline; a reference
+ * with only an id is looked up in the account's policy list.
+ */
+export function appPolicies(app, policies) {
+  return (app.policies ?? []).map((ref) => (ref.decision ? ref : policies.find((p) => p.id === ref.id) ?? ref));
 }
 
 /** The URIs an app guards, whichever field it was created with. */
@@ -81,7 +98,7 @@ export function appUris(app) {
 
 /** Apps guarding any of `uris`, so an exact match and a partial overlap are both visible. */
 export async function findAppsTouching(cf, uris) {
-  const apps = await cfListAll(cf, `/accounts/${cf.accountId}/access/apps`, { per_page: "1000" });
+  const apps = await listAccessApps(cf);
   return apps.filter((app) => appUris(app).some((uri) => uris.includes(uri)));
 }
 

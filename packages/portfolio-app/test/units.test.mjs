@@ -1,7 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { accessDestinations, classifyRoute, normalizePrefix } from "../skills/portfolio-app/scripts/lib/prefix.mjs";
-import { checkAccessRedirect, verifyPath } from "../skills/portfolio-app/scripts/lib/verify.mjs";
+import {
+  accessDestinations, classifyRoute, normalizePrefix, normalizePublicPath, pathCovers, privateDestinations,
+} from "../skills/portfolio-app/scripts/lib/prefix.mjs";
+import { checkAccessRedirect, checkSignedOutAnswer, mixedProbes, verifyPath } from "../skills/portfolio-app/scripts/lib/verify.mjs";
+import { appPolicies, isBypassEveryone } from "../skills/portfolio-app/scripts/lib/cloudflare.mjs";
 import { D1_PLACEHOLDER, d1Target, parseJsonc, r2Target, replacePlaceholder } from "../skills/portfolio-app/scripts/lib/wrangler-config.mjs";
 import { parseConfig, repoFromRemote } from "../skills/portfolio-app/scripts/lib/local.mjs";
 import { ACCESS_LOGIN, DOMAIN, TEAM, WRANGLER_WITH_PLACEHOLDER, fakeFetch } from "./helpers.mjs";
@@ -144,4 +147,73 @@ test("r2Target picks one bucket per app, and says why when it cannot", () => {
   assert.equal(r2Target(cfg("a-1", "b-2")).state, "conflict");
   assert.equal(r2Target({ r2_buckets: [{ binding: "B" }] }).state, "conflict");
   assert.equal(r2Target(cfg("Bad_Name")).state, "conflict");
+});
+
+test("normalizePublicPath keeps a public path inside the app's prefix, exact or with a final /*", () => {
+  assert.equal(normalizePublicPath("time-track", "/time-track"), "/time-track");
+  assert.equal(normalizePublicPath("/time-track/_next/*", "/time-track"), "/time-track/_next/*");
+  assert.equal(normalizePublicPath("graph/public.txt", "/graph"), "/graph/public.txt");
+  assert.equal(normalizePublicPath("/graph/manifest.webmanifest", "/graph"), "/graph/manifest.webmanifest");
+  assert.equal(normalizePublicPath("/work/atlas/data/*", "/work/atlas"), "/work/atlas/data/*");
+  for (const bad of ["", "/", "/graphs", "/graphx/public", "/quiz/public", "/graph/*", "/*", "/graph/a*", "/graph/*/b",
+    "/graph/..", "/graph/./x", "/graph/", "/graph//x", "/graph/a b", "/graph/x?y", "/graph/x#y"]) {
+    assert.throws(() => normalizePublicPath(bad, "/graph"), /refusing public path/, `should refuse ${JSON.stringify(bad)}`);
+  }
+});
+
+test("pathCovers and privateDestinations: a public bare prefix leaves only <prefix>/* behind sign-in", () => {
+  assert.equal(pathCovers("/graph/_next/*", "/graph/_next/a.js"), true);
+  assert.equal(pathCovers("/graph/_next/*", "/graph/_next"), false, "a /* destination does not cover its own base");
+  assert.equal(pathCovers("/graph/public", "/graph/public/x"), false);
+  assert.deepEqual(privateDestinations("example.com", "/time-track", ["/time-track", "/time-track/_next/*"]), ["example.com/time-track/*"]);
+  assert.deepEqual(privateDestinations("example.com", "/graph", ["/graph/public"]), ["example.com/graph", "example.com/graph/*"]);
+  assert.deepEqual(privateDestinations("example.com", "/graph", []), accessDestinations("example.com", "/graph"));
+});
+
+test("mixedProbes: private probes include the API and drop any a public path covers", () => {
+  assert.deepEqual(mixedProbes("example.com", "/time-track", ["/time-track", "/time-track/_next/*"]), [
+    { url: "https://example.com/time-track/portfolio-app-verify", expect: "access" },
+    { url: "https://example.com/time-track/api/portfolio-app-verify", expect: "access" },
+    { url: "https://example.com/time-track", expect: "public" },
+    { url: "https://example.com/time-track/_next/portfolio-app-verify", expect: "public" },
+  ]);
+  const apiPublic = mixedProbes("example.com", "/graph", ["/graph/api/*"]).filter((p) => p.expect === "access").map((p) => p.url);
+  assert.deepEqual(apiPublic, ["https://example.com/graph", "https://example.com/graph/portfolio-app-verify"]);
+});
+
+test("verifyPath with public paths fails when no private probe is left", async () => {
+  const { fetch } = fakeFetch({ protected: [] });
+  const all = ["/q", "/q/portfolio-app-verify", "/q/api/*"];
+  const result = await verifyPath({ fetch, domain: DOMAIN, prefix: "/q", team: TEAM, publicPaths: all });
+  assert.equal(result.results.every((r) => r.expect === "public" && r.ok), true);
+  assert.equal(result.ok, false, "a mixed check with nothing private is never a pass");
+});
+
+test("checkSignedOutAnswer passes any non-Access answer except a bare 401/403", async () => {
+  const respond = (status, location) => async () => ({ status, headers: new Map(location ? [["location", location]] : []) });
+  const url = `https://${DOMAIN}/graph/public`;
+  assert.equal((await checkSignedOutAnswer({ fetch: respond(200), url })).ok, true);
+  assert.equal((await checkSignedOutAnswer({ fetch: respond(404), url })).ok, true, "the app's own 404 is still not Access");
+  assert.equal((await checkSignedOutAnswer({ fetch: respond(301, `https://${DOMAIN}/graph/public/`), url })).ok, true);
+  assert.equal((await checkSignedOutAnswer({ fetch: respond(302, ACCESS_LOGIN), url })).ok, false);
+  const otherTeam = ACCESS_LOGIN.replace(TEAM, "someone-else");
+  assert.equal((await checkSignedOutAnswer({ fetch: respond(302, otherTeam), url })).ok, false, "any team's login fails a public path");
+  for (const status of [401, 403]) {
+    const r = await checkSignedOutAnswer({ fetch: respond(status), url });
+    assert.equal(r.ok, false);
+    assert.match(r.reason, new RegExp(`bare ${status} — Access or Cloudflare's bot protection`));
+  }
+  assert.equal((await checkSignedOutAnswer({ fetch: async () => { throw new Error("ENOTFOUND"); }, url })).ok, false);
+});
+
+test("isBypassEveryone and appPolicies read policies inline or by id", () => {
+  const everyone = { id: "p1", decision: "bypass", include: [{ everyone: {} }] };
+  assert.equal(isBypassEveryone(everyone), true);
+  assert.equal(isBypassEveryone({ ...everyone, decision: "allow" }), false);
+  assert.equal(isBypassEveryone({ ...everyone, include: [{ email: { email: "a@b.c" } }] }), false);
+  assert.equal(isBypassEveryone({ ...everyone, require: [{ country: { country_code: "IN" } }] }), false);
+  assert.equal(isBypassEveryone({ ...everyone, exclude: [{ email: { email: "a@b.c" } }] }), false);
+  assert.deepEqual(appPolicies({ policies: [{ id: "p1", precedence: 1 }] }, [everyone]), [everyone]);
+  assert.deepEqual(appPolicies({ policies: [{ ...everyone, precedence: 1 }] }, []), [{ ...everyone, precedence: 1 }]);
+  assert.deepEqual(appPolicies({}, [everyone]), []);
 });

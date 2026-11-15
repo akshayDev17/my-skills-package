@@ -12,6 +12,7 @@ export const KEYCHAIN_SERVICE = "portfolio-app";
 export const SETUP_TOKEN_ACCOUNT = "cloudflare-setup-token";
 export const DEPLOY_TOKEN_ACCOUNT = "cloudflare-deploy-token";
 export const POLICY_NAME = "portfolio-app sign-in";
+export const PUBLIC_POLICY_NAME = "portfolio-app public";
 export const GITHUB_ENVIRONMENT = "production";
 
 export function defaultConfigPath() {

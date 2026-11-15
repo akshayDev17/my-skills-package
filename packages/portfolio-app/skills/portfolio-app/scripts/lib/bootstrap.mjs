@@ -10,12 +10,20 @@
 // until the path answers with the Access login. A public app (`--public`, never
 // inferred) skips Access entirely and gets Worker routes for its prefix instead; it
 // refuses a path that already has Access protection rather than removing it.
+//
+// A mixed app (`--public-path`, repeatable, never inferred) is a private app plus one
+// more Access app: "<repo name> (public)", a Bypass-for-Everyone app holding exactly the
+// listed public paths. Its Allow app is the private one, less any listed destination,
+// and apply waits until the private paths redirect to the login and the public ones
+// answer signed out. It never edits, narrows or moves a destination out of an existing
+// app; anything in the way is a conflict.
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { accessDestinations, classifyRoute } from "./prefix.mjs";
+import { accessDestinations, classifyRoute, privateDestinations, publicDestinations } from "./prefix.mjs";
 import { verifyPath, waitForAccess } from "./verify.mjs";
 import {
+  appPolicies,
   appUris,
   createD1,
   createR2Bucket,
@@ -27,7 +35,11 @@ import {
   findR2Bucket,
   findReusablePolicy,
   findZone,
+  isBypassEveryone,
+  listAccessApps,
+  listAccessPolicies,
   listWorkerRoutes,
+  pickReusablePolicy,
   policyEmails,
   workerExists,
 } from "./cloudflare.mjs";
@@ -37,6 +49,7 @@ import {
   GITHUB_ENVIRONMENT,
   KEYCHAIN_SERVICE,
   POLICY_NAME,
+  PUBLIC_POLICY_NAME,
   cloneRepo,
   ghCreateEnvironment,
   ghEnvironmentExists,
@@ -66,9 +79,9 @@ async function readWithScope(scope, what, read) {
   }
 }
 
-async function planAccess({ cf, fetch }, { repo, prefix, config }) {
+async function planAccess({ cf }, { repo, prefix, config, publicPaths = [] }) {
   const actions = [];
-  const uris = accessDestinations(config.domain, prefix);
+  const uris = privateDestinations(config.domain, prefix, publicPaths);
 
   const policy = await findReusablePolicy(cf, POLICY_NAME);
   if (policy) {
@@ -94,7 +107,7 @@ async function planAccess({ cf, fetch }, { repo, prefix, config }) {
     }
   } else if (exact.length > 0) {
     const app = exact[0];
-    actions.push({ step: "access", kind: "app", state: "ok", summary: `Access app "${app.name}" guards ${uris.join(" + ")}` });
+    actions.push({ step: "access", kind: "app", state: "ok", name: app.name, summary: `Access app "${app.name}" guards ${uris.join(" + ")}` });
     const attached = (app.policies ?? []).some((p) => policy && p.id === policy.id);
     if (!attached) {
       actions.push({ step: "access", kind: "app-policy", state: "warn",
@@ -105,12 +118,90 @@ async function planAccess({ cf, fetch }, { repo, prefix, config }) {
     actions.push({ step: "access", kind: "app", state: "create", name, uris,
       summary: `create self-hosted Access app "${name}" — destinations ${uris.join(" + ")}, policy "${POLICY_NAME}"` });
   }
-
-  const now = await verifyPath({ fetch, domain: config.domain, prefix, team: config.team });
-  actions.push({ step: "access", kind: "check", state: now.ok ? "ok" : "info",
-    summary: now.ok ? `${prefix} already redirects to ${config.team}.cloudflareaccess.com`
-      : `now: ${now.results.map((r) => `${r.url} ${r.reason}`).join("; ")}` });
   return actions;
+}
+
+/** What the site answers right now; with `publicPaths`, both ways (see verify.mjs). */
+async function planAccessCheck({ fetch }, { prefix, config, publicPaths = [] }) {
+  const now = await verifyPath({ fetch, domain: config.domain, prefix, team: config.team, publicPaths });
+  const except = publicPaths.length > 0 ? `, and its public paths answer signed out` : "";
+  return [{ step: "access", kind: "check", state: now.ok ? "ok" : "info",
+    summary: now.ok ? `${prefix} already redirects to ${config.team}.cloudflareaccess.com${except}`
+      : `now: ${now.results.map((r) => `${r.url} ${r.reason}`).join("; ")}` }];
+}
+
+const NEVER_MOVE = "a destination stays with the app that holds it — the tool never edits, narrows or moves one out of an existing app; fix it by hand";
+
+/**
+ * Mixed apps only: the Bypass-for-Everyone app on exactly the listed public paths, and
+ * the reusable Bypass policy it links. An app holding exactly those destinations is
+ * reused if every policy on it is Bypass for Everyone. Conflicts: any other app holding
+ * a listed destination, an app with the public app's name holding anything else, and a
+ * Bypass app that opens more of the prefix than the list. A Bypass app above the prefix
+ * (say `<domain>/*`) is left alone: the app's own destinations are more specific.
+ */
+async function planBypass({ cf }, { repo, prefix, config, publicPaths }) {
+  const uris = publicDestinations(config.domain, publicPaths);
+  const name = `${repo.split("/")[1]} (public)`;
+  const policies = await listAccessPolicies(cf);
+  const apps = await listAccessApps(cf);
+  const app = (state, summary, extra = {}) => ({ step: "access", kind: "bypass-app", state, summary, ...extra });
+  // An Access destination with no path covers the whole host, as a route `<host>/*` would.
+  const relations = (a) => appUris(a).map((uri) => classifyRoute(uri.includes("/") ? uri : `${uri}/*`, config.domain, prefix));
+  const bypasses = (a) => appPolicies(a, policies).some((p) => p.decision === "bypass");
+  const everyoneOnly = (a) => appPolicies(a, policies).length > 0 && appPolicies(a, policies).every(isBypassEveryone);
+
+  const exact = apps.find((a) => sameSet(appUris(a), uris));
+  const appActions = [];
+  for (const a of apps) {
+    const held = appUris(a);
+    const shared = held.filter((uri) => uris.includes(uri));
+    if (a === exact) {
+      appActions.push(everyoneOnly(a)
+        ? app("ok", `Bypass app "${a.name}" lets anyone reach ${uris.join(" + ")}`, { name: a.name })
+        : app("conflict", `Access app "${a.name}" holds exactly the public paths but is not Bypass for Everyone; ${NEVER_MOVE}`));
+    } else if (a.name === name) {
+      appActions.push(app("conflict", `Access app "${a.name}" holds [${held.join(", ")}], not exactly the public paths [${uris.join(", ")}]; ${NEVER_MOVE}`));
+    } else if (shared.length > 0) {
+      appActions.push(app("conflict", `${shared.join(" + ")} already belong(s) to Access app "${a.name}" [${held.join(", ")}]; ${NEVER_MOVE}`));
+    } else if (bypasses(a) && relations(a).some((r) => r === "exact" || r === "inside" || r === "straddles")) {
+      appActions.push(app("conflict", `Bypass app "${a.name}" lets anyone reach [${held.join(", ")}], more of ${prefix} than the public paths [${uris.join(", ")}]; narrow or remove it by hand`));
+    } else if (bypasses(a) && relations(a).includes("broader")) {
+      appActions.push(app("info", `Bypass app "${a.name}" on [${held.join(", ")}] is broader than ${prefix}; the app's own destinations are more specific and win under it — left alone`));
+    }
+  }
+  if (exact || appActions.some((x) => x.state === "conflict")) return appActions;
+
+  const policy = pickReusablePolicy(policies, PUBLIC_POLICY_NAME);
+  const policyAction = !policy
+    ? { step: "access", kind: "bypass-policy", state: "create", name: PUBLIC_POLICY_NAME,
+      summary: `create reusable policy "${PUBLIC_POLICY_NAME}" (bypass: everyone)` }
+    : isBypassEveryone(policy)
+      ? { step: "access", kind: "bypass-policy", state: "ok", policyId: policy.id, summary: `reusable policy "${policy.name}" exists (bypass: everyone)` }
+      : { step: "access", kind: "bypass-policy", state: "conflict",
+        summary: `reusable policy "${policy.name}" exists but is not Bypass for Everyone — left unchanged; fix it in the Zero Trust dashboard` };
+  if (policyAction.state === "conflict") return [policyAction, ...appActions];
+  return [
+    policyAction,
+    ...appActions,
+    app("create", `create self-hosted Access app "${name}" — destinations ${uris.join(" + ")}, policy "${PUBLIC_POLICY_NAME}" (anyone, no sign-in)`, { name, uris }),
+  ];
+}
+
+/** Mixed apps only: which app answers each listed destination, and the rest of the prefix. */
+function planCoverage(actions, { prefix, config, publicPaths }) {
+  const line = (summary) => ({ step: "access", kind: "coverage", state: "info", summary });
+  if (actions.some((a) => a.step === "access" && a.state === "conflict")) {
+    return [line(`which app answers what is known once the conflicts are resolved`)];
+  }
+  const allow = actions.find((a) => a.kind === "app")?.name;
+  const bypass = actions.find((a) => a.kind === "bypass-app" && a.state !== "info")?.name;
+  return [
+    line(`who answers (the app with the most specific matching destination wins; Bypass lets anyone in, Allow asks for sign-in):`),
+    ...publicDestinations(config.domain, publicPaths).map((uri) => line(`  ${uri} → "${bypass}" — Bypass, anyone`)),
+    ...privateDestinations(config.domain, prefix, publicPaths).map((uri) =>
+      line(`  ${uri}${uri.endsWith("*") ? " (the rest)" : ""} → "${allow}" — Allow, sign-in`)),
+  ];
 }
 
 async function planPublicAccess({ cf, fetch }, { prefix, config }) {
@@ -282,14 +373,22 @@ function planGithub({ run }, { repo }) {
   return actions;
 }
 
+/** Private and mixed apps: the Allow app, then (mixed) the Bypass app, then the site's answer. */
+async function planPrivateAccess(deps, opts) {
+  const allow = await planAccess(deps, opts);
+  if (!opts.publicPaths?.length) return [...allow, ...(await planAccessCheck(deps, opts))];
+  const both = [...allow, ...(await planBypass(deps, opts))];
+  return [...both, ...planCoverage(both, opts), ...(await planAccessCheck(deps, opts))];
+}
+
 /**
  * Read-only. `deps = { cf, run, fetch }`;
- * `opts = { repo, prefix, cloneDir, d1Flag, public, config }`.
+ * `opts = { repo, prefix, cloneDir, d1Flag, public, publicPaths, config }`.
  */
 export async function planBootstrap(deps, opts) {
   const clone = readClone(deps, opts);
   return [
-    ...(opts.public ? await planPublicAccess(deps, opts) : await planAccess(deps, opts)),
+    ...(opts.public ? await planPublicAccess(deps, opts) : await planPrivateAccess(deps, opts)),
     ...(await planD1(deps, opts, clone)),
     ...(opts.public ? await planR2(deps, clone) : []),
     ...(opts.public ? await planRoutes(deps, opts, clone) : []),
@@ -301,8 +400,9 @@ const MARK = { ok: "✓", create: "+", warn: "!", conflict: "✗", info: "·" };
 const HEADING = { access: "Cloudflare Access", d1: "D1", r2: "R2", route: "Worker routes", github: "GitHub" };
 const OPTIONAL_STEPS = ["r2", "route"];
 
-export function formatPlan(actions, { repo, prefix, apply, public: isPublic }) {
-  const mode = isPublic ? " (public: no Access sign-in)" : "";
+export function formatPlan(actions, { repo, prefix, apply, public: isPublic, publicPaths = [] }) {
+  const mode = isPublic ? " (public: no Access sign-in)"
+    : publicPaths.length > 0 ? ` (mixed: sign-in except ${publicPaths.join(", ")})` : "";
   const lines = [`portfolio-app bootstrap ${repo} ${prefix}${mode} — ${apply ? "applying" : "plan only; nothing changes without --apply"}`];
   for (const step of ["access", "d1", "r2", "route", "github"]) {
     const stepActions = actions.filter((x) => x.step === step);
@@ -323,30 +423,42 @@ export function formatPlan(actions, { repo, prefix, apply, public: isPublic }) {
 /**
  * Carries out the "create" actions in plan order. Refuses while any conflict stands.
  * Private: Access first, and nothing else until the path redirects to the Access login.
+ * Mixed: the Allow app, then the Bypass app, and nothing else until the private paths
+ * redirect to the login and the public ones answer signed out.
  * Public: no Access step and no login wait; Cloudflare resources, then GitHub.
  */
-export async function applyBootstrap({ cf, run, fetch, sleep, log }, actions, { prefix, repo, config, public: isPublic }) {
+export async function applyBootstrap({ cf, run, fetch, sleep, log }, actions, { prefix, repo, config, public: isPublic, publicPaths = [] }) {
   const conflicts = actions.filter((a) => a.state === "conflict");
   if (conflicts.length > 0) throw new Error(`refusing to apply: ${conflicts.length} conflict(s) in the plan`);
 
   let policyId = actions.find((a) => a.kind === "policy")?.policyId ?? null;
+  let bypassPolicyId = actions.find((a) => a.kind === "bypass-policy")?.policyId ?? null;
   let databaseId = actions.find((a) => a.kind === "d1-database" || a.kind === "d1-config")?.databaseId ?? null;
 
   if (!isPublic) {
     for (const action of actions.filter((a) => a.step === "access" && a.state === "create")) {
       if (action.kind === "policy") {
-        policyId = (await createReusablePolicy(cf, { name: action.name, emails: action.emails })).id;
+        const include = action.emails.map((email) => ({ email: { email } }));
+        policyId = (await createReusablePolicy(cf, { name: action.name, decision: "allow", include })).id;
         log(`  + created reusable policy "${action.name}"`);
       } else if (action.kind === "app") {
         await createSelfHostedApp(cf, { name: action.name, uris: action.uris, policyId });
         log(`  + created Access app "${action.name}"`);
+      } else if (action.kind === "bypass-policy") {
+        bypassPolicyId = (await createReusablePolicy(cf, { name: action.name, decision: "bypass", include: [{ everyone: {} }] })).id;
+        log(`  + created reusable policy "${action.name}" (bypass: everyone)`);
+      } else if (action.kind === "bypass-app") {
+        await createSelfHostedApp(cf, { name: action.name, uris: action.uris, policyId: bypassPolicyId });
+        log(`  + created Bypass app "${action.name}"`);
       }
     }
-    const check = await waitForAccess({ fetch, domain: config.domain, prefix, team: config.team, sleep });
+    const check = await waitForAccess({ fetch, domain: config.domain, prefix, team: config.team, publicPaths, sleep });
     if (!check.ok) {
       throw new Error(`Access is not answering for ${prefix}: ${check.results.filter((r) => !r.ok).map((r) => `${r.url} ${r.reason}`).join("; ")}`);
     }
-    log(`  ✓ ${prefix} redirects to ${config.team}.cloudflareaccess.com`);
+    log(publicPaths.length > 0
+      ? `  ✓ ${prefix} redirects to ${config.team}.cloudflareaccess.com, and its ${publicPaths.length} public path(s) answer signed out`
+      : `  ✓ ${prefix} redirects to ${config.team}.cloudflareaccess.com`);
   }
 
   for (const action of actions.filter((a) => a.step !== "access" && a.state === "create")) {

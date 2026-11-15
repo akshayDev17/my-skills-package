@@ -3,6 +3,9 @@
 Set up a new sub-app of the personal site in one command, and check from CI that its path is
 behind Cloudflare Access before every deploy. A sub-app meant for everyone can instead be set up
 as a public app with `--public`, which skips Access and gives it an R2 bucket and Worker routes.
+A sub-app that is signed in by default but has a few public paths is a mixed app: name each
+public path with `--public-path`, and it gets a second Access app that lets anyone reach exactly
+those paths.
 
 Ships one skill (`skills/portfolio-app/SKILL.md`) and the script it drives
 (`skills/portfolio-app/scripts/portfolio-app.mjs`), which is also the package's `portfolio-app`
@@ -12,7 +15,8 @@ bin, so it runs with or without an agent. Works with Claude Code, Codex, Gemini 
 ## `bootstrap`
 
 ```sh
-portfolio-app bootstrap --repo <owner/name> --path /<prefix> [--public] [--d1 <name>] [--clone <dir>] [--apply]
+portfolio-app bootstrap --repo <owner/name> --path /<prefix> [--public | --public-path <path>…]
+                        [--d1 <name>] [--clone <dir>] [--apply]
 ```
 
 A prefix may have several segments (`/work/election-atlas`). Without `--public`, three steps,
@@ -54,6 +58,69 @@ says the two destinations will be reachable by anyone. The steps, in apply order
 
 `verify` fails by design on a public path, so a public app's deploy job does not run it.
 
+### `--public-path`: signed in by default, with named public paths
+
+A mixed app is a private app (all of the above) plus a list of public paths given on the
+command line, one `--public-path` per path. Nothing is inferred: a path is public only when it
+is listed. Each path is one of:
+
+- `/<prefix>` itself;
+- an exact path under it, such as `/graph/public.txt`;
+- a directory under it with a final `/*`, such as `/graph/_next/*`.
+
+The leading `/` is optional. Refused before anything is read: a path outside the prefix,
+`/<prefix>/*` (the whole app; that is `--public`), a `*` anywhere but a final `/*`, empty, `.` or
+`..` segments, queries, and `--public` together with `--public-path`.
+
+```sh
+# time-track: everything signed in except the landing page and its static assets
+portfolio-app bootstrap --repo owner/time-track --path /time-track \
+  --public-path /time-track --public-path '/time-track/_next/*' --clone ../time-track
+
+# graph-notes: its Allow app and D1 already exist, so only the public app is new
+portfolio-app bootstrap --repo owner/graph-notes --path /graph \
+  --public-path /graph/public --public-path /graph/public.txt --public-path '/graph/_next/*' \
+  --public-path '/graph/icons/*' --public-path /graph/manifest.webmanifest \
+  --public-path '/graph/api/public/*' --clone ../graph-notes
+```
+
+The Cloudflare Access step, in apply order:
+
+1. **The Allow app**, as for a private app, on `<domain>/<prefix>` and `<domain>/<prefix>/*`.
+   If `/<prefix>` itself is public, that destination is left out, so time-track's Allow app holds
+   only `<domain>/time-track/*`. An existing Allow app with exactly those destinations is reused
+   and never edited.
+2. **The Bypass policy.** Find or create one reusable policy named `portfolio-app public`, with
+   decision *bypass* and the single include rule *Everyone*. If a policy by that name exists and
+   is anything else, the plan is a conflict; the tool does not rewrite it.
+3. **The Bypass app** `<repo name> (public)` (graph-notes gets `graph-notes (public)`), whose
+   destinations are exactly the listed paths, attached to that policy. An existing app holding
+   exactly those destinations, all of whose policies are Bypass for Everyone, is reused under
+   whatever name it has.
+4. **Wait for both answers.** With `--apply`, it waits until every private probe redirects to
+   the Access login and every public path answers signed out (see `verify` below), and stops
+   before D1 or GitHub if that never happens.
+
+D1 and GitHub follow as for a private app. Each step only fills in what is missing, so a mixed
+run on an app that already has its Allow app, D1 and secrets creates only the Bypass policy and
+app.
+
+**Which app answers which path.** When several Access apps match a request, the one with the
+most specific matching destination applies, and within one app Bypass policies are evaluated
+before Allow. The Bypass app's destinations all sit under the prefix, so they are more specific
+than the Allow app's `<prefix>/*` and win for the listed paths; everything else under the prefix
+still goes to the Allow app. The plan prints this per destination:
+
+```
+  · who answers (the app with the most specific matching destination wins; Bypass lets anyone in, Allow asks for sign-in):
+  ·   example.com/time-track → "time-track (public)" — Bypass, anyone
+  ·   example.com/time-track/_next/* → "time-track (public)" — Bypass, anyone
+  ·   example.com/time-track/* (the rest) → "time-track (/time-track)" — Allow, sign-in
+```
+
+A `/*` destination does not cover its own base: `/graph/_next/*` makes `/graph/_next/a.js` public,
+not `/graph/_next`.
+
 ### Plan, apply, exit codes
 
 Without `--apply`, the command prints the plan and changes nothing: planning makes Cloudflare
@@ -69,6 +136,12 @@ ok, `1` a step failed, `2` usage error or a conflict in the plan.
   - an existing Access app that overlaps the two destinations without matching them exactly;
   - with `--public`, any Access app on the destinations, or a path that already redirects to
     an Access login;
+  - with `--public-path`: an app other than the public app that already holds a listed path (a
+    destination is never moved from one app to another); an app named `<repo name> (public)`
+    that holds anything but exactly the listed paths; an app holding exactly the listed paths
+    that is not Bypass for Everyone; a Bypass app that opens more of the prefix than the list
+    (say `<domain>/graph/api/*` when only `/graph/api/public/*` is listed); and a
+    `portfolio-app public` policy that is not Bypass for Everyone;
   - a clone of a different repo;
   - placeholder entries that name more than one database; with `--public`, `r2_buckets` that
     name several buckets, an entry with no `bucket_name` or an invalid one, or a
@@ -83,14 +156,16 @@ ok, `1` a step failed, `2` usage error or a conflict in the plan.
   - a policy whose emails differ from the config;
   - an exact-match Access app that is not attached to the policy;
   - a broader route of another Worker, such as the home site's `<domain>/*`: the app's longer
-    patterns are more specific, so Cloudflare sends the prefix to the app.
+    patterns are more specific, so Cloudflare sends the prefix to the app;
+  - with `--public-path`, a Bypass app above the prefix (such as one on `<domain>`): the app's
+    own destinations are more specific, so it does not reach the private paths.
 
   Changing who can sign in is a decision for the Zero Trust dashboard, not for a re-run.
 
 ## `verify`: the login check for deploy jobs
 
 ```sh
-portfolio-app verify --path /<prefix> --domain <host> [--team <team>]
+portfolio-app verify --path /<prefix> --domain <host> [--team <team>] [--public-path <path>…]
 ```
 
 Requests `https://<host>/<prefix>` and `https://<host>/<prefix>/portfolio-app-verify` without
@@ -106,6 +181,20 @@ given), so it can be the first step of a GitHub Actions deploy job:
 
 Until the package is published to npm, run the script from a checkout of this repo instead:
 `node packages/portfolio-app/skills/portfolio-app/scripts/portfolio-app.mjs verify …`.
+
+**A mixed app** passes the same `--public-path` list it was bootstrapped with, and then the check
+goes both ways. The private probes are `/<prefix>` (unless it is public),
+`/<prefix>/portfolio-app-verify` and `/<prefix>/api/portfolio-app-verify`, less any that a public
+path covers; each must redirect to the Access login. Each public path is probed as itself, or
+as `<dir>/portfolio-app-verify` for a `<dir>/*` path, and must answer without a redirect to any
+Access login. The app's own 404 counts as an answer. Without `--public-path`, `verify` behaves
+exactly as before.
+
+**Limit:** a public path that answers a bare `401` or `403` fails the check. Access can answer
+that way, and so can Cloudflare's bot protection when it refuses an automated client; from a
+signed-out request without a browser the two look the same, so the line says to open the path in
+a private browser window. The private probes need a real 3xx to the login, so a bot-protection
+`403` can never pass a private path.
 
 ## One-time machine setup
 
@@ -150,7 +239,7 @@ after fixing the token resumes safely, since every step only fills in what is mi
 
 | permission | needed for |
 |---|---|
-| Account · Access: Apps and Policies · Edit | every run: Access policy and app (a `--public` run only reads the apps) |
+| Account · Access: Apps and Policies · Edit | every run: Access policies and apps (a `--public` run only reads the apps) |
 | Account · D1 · Edit | every run: the D1 database |
 | Account · Workers R2 Storage · Edit | `--public` when the clone binds an R2 bucket |
 | Zone · Zone · Read, on the site's zone | `--public`: finding the zone id for the routes |
@@ -190,6 +279,27 @@ security add-generic-password -s portfolio-app -a cloudflare-deploy-token -w
   - [list apps](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/applications/methods/list/)
   - [create policy](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/policies/methods/create/)
   - [list policies](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/policies/methods/list/)
+
+### Mixed apps: Bypass policies and overlapping apps (read 2026-11-15)
+
+- **Bypass for Everyone:** a reusable policy's `decision` may be `allow`, `deny`, `non_identity`
+  or `bypass`. The Everyone rule is `{"everyone": {}}`, "an empty object which matches on all
+  users".
+- **Order inside one app:** "Bypass and Service Auth policies are evaluated first", then Block
+  and Allow.
+- **Overlapping apps:** for paths under one root, "the more specific rule … takes precedence,
+  and no rule is inherited" from the less specific one, and `example.com/alpha/*` does not
+  cover `example.com/alpha`.
+- **Not answered by the docs:**
+  - which app applies when two apps hold the same destination. The tool never creates one:
+    a listed destination held by any other app is a conflict.
+  - whether the apps list always carries policies inline. Bypass detection reads a policy
+    inline when it is there and otherwise looks it up by id in the policy list.
+- **Not confirmed against a live account.**
+- Sources:
+  - [reusable policy create](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/policies/methods/create/)
+  - [Access policies, order of execution](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/)
+  - [application paths](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/)
 
 ### R2 buckets and Worker routes (read 2026-11-02)
 

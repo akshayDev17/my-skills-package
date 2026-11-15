@@ -4,6 +4,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { appUris } from "../skills/portfolio-app/scripts/lib/cloudflare.mjs";
 
 export const ACCOUNT = "0123456789abcdef0123456789abcdef";
 export const DOMAIN = "example.com";
@@ -32,6 +33,27 @@ export const ACCESS_LOGIN = `https://${TEAM}.cloudflareaccess.com/cdn-cgi/access
 
 const denied = () => jsonResponse(403, { success: false, errors: [{ code: 10000, message: "Authentication error" }] });
 
+/** Whether an Access destination covers `host/path`: exact, `…/*`, or a bare host (all of it). */
+const destinationCovers = (uri, target) =>
+  uri.endsWith("/*") ? target.startsWith(uri.slice(0, -1)) : !uri.includes("/") ? target.split("/")[0] === uri : target === uri;
+
+/**
+ * How the fake site's Access answers a request, as Cloudflare does: the app with the
+ * most specific (longest) matching destination decides; Bypass on every policy lets
+ * anyone in, anything else asks for sign-in. Apps with no policies count as Allow.
+ */
+function accessAnswer(state, target) {
+  let best = null;
+  for (const app of state.apps ?? []) {
+    for (const uri of appUris(app)) {
+      if (destinationCovers(uri, target) && (!best || uri.length > best.uri.length)) best = { app, uri };
+    }
+  }
+  if (!best) return null;
+  const decisions = (best.app.policies ?? []).map((ref) => ref.decision ?? (state.policies ?? []).find((p) => p.id === ref.id)?.decision);
+  return decisions.length > 0 && decisions.every((d) => d === "bypass") ? "bypass" : "allow";
+}
+
 /**
  * A fake Cloudflare account plus the public site. `state` is mutated by POSTs so an
  * apply followed by a plan sees what apply created. `state.deny` lists the API areas
@@ -45,6 +67,8 @@ export function fakeFetch(state) {
     const u = new URL(url);
 
     if (u.hostname !== "api.cloudflare.com") {
+      const answer = accessAnswer(state, `${u.hostname}${u.pathname}`);
+      if (answer) return answer === "bypass" ? plain(200) : redirect(ACCESS_LOGIN);
       const protectedPaths = state.protected ?? [];
       return protectedPaths.some((p) => u.pathname === p || u.pathname.startsWith(`${p}/`))
         ? redirect(ACCESS_LOGIN)
@@ -66,7 +90,6 @@ export function fakeFetch(state) {
     if (path === `${base}/access/apps` && method === "POST") {
       const app = { id: `app-${state.apps.length + 1}`, ...JSON.parse(init.body) };
       state.apps.push(app);
-      state.protected = [...(state.protected ?? []), new URL(`https://${app.domain}`).pathname];
       return jsonResponse(200, { success: true, result: app });
     }
     if (path === `${base}/d1/database` && method === "GET") {

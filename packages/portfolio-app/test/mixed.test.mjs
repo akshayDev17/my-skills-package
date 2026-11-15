@@ -308,6 +308,38 @@ test("mixed apply stops before D1 and GitHub when a public path still asks for s
   }
 });
 
+test("mixed apply stops before D1 and GitHub when the children of an exact public path inherit its Bypass", async () => {
+  const world = freshWorld();
+  world.site.inheritExact = true;
+  const cloneDir = makeClone();
+  const h = harness(world);
+  const opts = gnOpts(cloneDir);
+  const actions = await planBootstrap(h.deps, opts);
+  await assert.rejects(applyBootstrap(h.deps, actions, opts), (err) => {
+    assert.match(err.message, /^Access is not answering for \/graph: /);
+    for (const child of ["/graph/public/portfolio-app-verify", "/graph/public.txt/portfolio-app-verify", "/graph/manifest.webmanifest/portfolio-app-verify"]) {
+      assert.ok(err.message.includes(`https://${DOMAIN}${child} answered 200 — not behind Access`), `${child}: ${err.message}`);
+    }
+    assert.doesNotMatch(err.message, /public path still asks for sign-in|graph\/api\/portfolio-app-verify/, "only the inherited children fail");
+    return true;
+  });
+  assert.deepEqual(world.site.apps.map((a) => a.name), ["graph-notes (/graph)", "graph-notes (public)"]);
+  assert.deepEqual(world.site.d1, [], "no D1 database");
+  assert.deepEqual(world.local.github, { environment: false, secrets: [] }, "GitHub untouched");
+  assert.equal(readFileSync(join(cloneDir, "backend", "wrangler.jsonc"), "utf8"), WRANGLER_WITH_PLACEHOLDER);
+});
+
+test("mixed apply passes under inheritance when the only exact public path is the prefix, whose children the Allow app's /* answers", async () => {
+  const world = timeTrackWorld();
+  world.site.inheritExact = true;
+  const cloneDir = makeClone(WRANGLER_TT);
+  const h = harness(world);
+  const actions = await planBootstrap(h.deps, ttOpts(cloneDir));
+  await applyBootstrap(h.deps, actions, ttOpts(cloneDir));
+  assert.match(h.logs.join("\n"), /✓ \/time-track redirects to test-team\.cloudflareaccess\.com, and its 2 public path\(s\) answer signed out/);
+  assert.equal(world.site.d1.length, 1);
+});
+
 // --- CLI ---------------------------------------------------------------------------
 
 function cli(world, argv) {
@@ -407,11 +439,18 @@ test("cli verify --public-path checks both ways; without it verify is unchanged"
   assert.equal(after.code, 0, after.out);
   assert.deepEqual(after.http.calls.map((c) => new URL(c.url).pathname), [
     "/graph", "/graph/portfolio-app-verify", "/graph/api/portfolio-app-verify",
+    "/graph/public/portfolio-app-verify", "/graph/public.txt/portfolio-app-verify", "/graph/manifest.webmanifest/portfolio-app-verify",
     "/graph/public", "/graph/public.txt", "/graph/_next/portfolio-app-verify", "/graph/icons/portfolio-app-verify",
     "/graph/manifest.webmanifest", "/graph/api/public/portfolio-app-verify",
   ]);
   assert.match(after.out, /example\.com\/graph is behind Cloudflare Access, and its 6 public path\(s\) answer signed out$/);
   assert.deepEqual(after.proc.calls, [], "still no keychain, git or gh");
+
+  world.site.inheritExact = true;
+  const inherited = await cli(world, args);
+  assert.equal(inherited.code, 1, "a child of an exact public path answers signed out");
+  assert.match(inherited.out, /✗ https:\/\/example\.com\/graph\/public\/portfolio-app-verify answered 200 — not behind Access/);
+  assert.match(inherited.out, /NOT set up as a mixed app/);
 
   const plain = await cli(world, ["verify", "--path", "/graph", "--domain", DOMAIN, "--team", TEAM]);
   assert.equal(plain.code, 0);

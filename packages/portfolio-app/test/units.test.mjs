@@ -170,20 +170,32 @@ test("pathCovers and privateDestinations: a public bare prefix leaves only <pref
   assert.deepEqual(privateDestinations("example.com", "/graph", []), accessDestinations("example.com", "/graph"));
 });
 
-test("mixedProbes: private probes include the API and drop any a public path covers", () => {
+test("mixedProbes: private probes include the API and a child of each exact public path, and drop any a public path covers", () => {
   assert.deepEqual(mixedProbes("example.com", "/time-track", ["/time-track", "/time-track/_next/*"]), [
     { url: "https://example.com/time-track/portfolio-app-verify", expect: "access" },
     { url: "https://example.com/time-track/api/portfolio-app-verify", expect: "access" },
     { url: "https://example.com/time-track", expect: "public" },
     { url: "https://example.com/time-track/_next/portfolio-app-verify", expect: "public" },
   ]);
-  const apiPublic = mixedProbes("example.com", "/graph", ["/graph/api/*"]).filter((p) => p.expect === "access").map((p) => p.url);
-  assert.deepEqual(apiPublic, ["https://example.com/graph", "https://example.com/graph/portfolio-app-verify"]);
+  const privateUrls = (publicPaths) => mixedProbes("example.com", "/graph", publicPaths).filter((p) => p.expect === "access").map((p) => p.url);
+  assert.deepEqual(privateUrls(["/graph/api/*"]), ["https://example.com/graph", "https://example.com/graph/portfolio-app-verify"]);
+  assert.deepEqual(privateUrls(["/graph/public", "/graph/public.txt", "/graph/_next/*"]), [
+    "https://example.com/graph",
+    "https://example.com/graph/portfolio-app-verify",
+    "https://example.com/graph/api/portfolio-app-verify",
+    "https://example.com/graph/public/portfolio-app-verify",
+    "https://example.com/graph/public.txt/portfolio-app-verify",
+  ]);
+  assert.deepEqual(privateUrls(["/graph/public", "/graph/public/*"]), [
+    "https://example.com/graph",
+    "https://example.com/graph/portfolio-app-verify",
+    "https://example.com/graph/api/portfolio-app-verify",
+  ], "a child that another listed path makes public is not probed as private");
 });
 
 test("verifyPath with public paths fails when no private probe is left", async () => {
   const { fetch } = fakeFetch({ protected: [] });
-  const all = ["/q", "/q/portfolio-app-verify", "/q/api/*"];
+  const all = ["/q", "/q/portfolio-app-verify", "/q/portfolio-app-verify/*", "/q/api/*"];
   const result = await verifyPath({ fetch, domain: DOMAIN, prefix: "/q", team: TEAM, publicPaths: all });
   assert.equal(result.results.every((r) => r.expect === "public" && r.ok), true);
   assert.equal(result.ok, false, "a mixed check with nothing private is never a pass");

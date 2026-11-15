@@ -14,9 +14,10 @@
 // A mixed app (`--public-path`, repeatable, never inferred) is a private app plus one
 // more Access app: "<repo name> (public)", a Bypass-for-Everyone app holding exactly the
 // listed public paths. Its Allow app is the private one, less any listed destination,
-// and apply waits until the private paths redirect to the login and the public ones
-// answer signed out. It never edits, narrows or moves a destination out of an existing
-// app; anything in the way is a conflict.
+// and apply waits until the private paths (a child of each exact public path among
+// them) redirect to the login and the public ones answer signed out. It never edits,
+// narrows or moves a destination out of an existing app; anything in the way is a
+// conflict.
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";

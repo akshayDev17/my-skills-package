@@ -28,11 +28,13 @@ const USAGE = `usage:
       named in wrangler.jsonc and Worker routes for exactly /<prefix> and /<prefix>/*.
       --public-path (repeatable) makes a mixed app: signed in by default, plus a Bypass
       app "<repo name> (public)" on exactly the listed paths. Each is /<prefix>,
-      /<prefix>/<path> or /<prefix>/<path>/*, inside the prefix.
+      /<prefix>/<path> or /<prefix>/<path>/*, inside the prefix. A path without /* is
+      public on its own; a path under it is checked to still ask for sign-in.
   portfolio-app verify --path /<prefix> [--public-path <path>…] [--domain <host>] [--team <team>]
                        [--config <file>]
       Exits 0 only when the path redirects to Cloudflare Access (with --public-path:
-      the private paths redirect and every listed public path answers signed out).
+      the private paths, a child of each exact public path among them, redirect and
+      every listed public path answers signed out).
       Needs no token.
 
 exit codes: 0 ok · 1 verify failed or a step failed · 2 usage error or plan conflict`;

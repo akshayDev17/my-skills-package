@@ -8,7 +8,10 @@
 // A mixed app (signed in by default, with named public paths) is probed both ways:
 // every private probe must redirect to the Access login, and every listed public path
 // must answer signed out. Its private probes add `<prefix>/api/…`, since an app's API
-// is the path a too-wide public entry would most likely expose.
+// is the path a too-wide public entry would most likely expose, and a child of every
+// public path listed without a `/*`: Cloudflare documents that a sub-path with no rule
+// of its own inherits its parent's, so only a probe shows whether the children of an
+// exact public path still ask for sign-in.
 
 import { pathCovers } from "./prefix.mjs";
 
@@ -20,11 +23,13 @@ export function probeUrls(domain, prefix) {
 
 /**
  * A mixed app's probes, each `{ url, expect }` with `expect` "access" or "public". The
- * private ones are the bare prefix, a child and an API child, less any a public path
- * covers; each public path is probed as itself, or a child of it for a `/*` one.
+ * private ones are the bare prefix, a child, an API child and a child of each public
+ * path listed without a `/*`, less any a public path covers; each public path is probed
+ * as itself, or a child of it for a `/*` one.
  */
 export function mixedProbes(domain, prefix, publicPaths) {
-  const privatePaths = [prefix, `${prefix}/${PROBE_SUBPATH}`, `${prefix}/api/${PROBE_SUBPATH}`]
+  const exactChildren = publicPaths.filter((p) => !p.endsWith("/*")).map((p) => `${p}/${PROBE_SUBPATH}`);
+  const privatePaths = [...new Set([prefix, `${prefix}/${PROBE_SUBPATH}`, `${prefix}/api/${PROBE_SUBPATH}`, ...exactChildren])]
     .filter((path) => !publicPaths.some((p) => pathCovers(p, path)));
   const publicProbes = publicPaths.map((p) => (p.endsWith("/*") ? `${p.slice(0, -1)}${PROBE_SUBPATH}` : p));
   return [

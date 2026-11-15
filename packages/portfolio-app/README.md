@@ -4,8 +4,9 @@ Set up a new sub-app of the personal site in one command, and check from CI that
 behind Cloudflare Access before every deploy. A sub-app meant for everyone can instead be set up
 as a public app with `--public`, which skips Access and gives it an R2 bucket and Worker routes.
 A sub-app that is signed in by default but has a few public paths is a mixed app: name each
-public path with `--public-path`, and it gets a second Access app that lets anyone reach exactly
-those paths.
+public path with `--public-path`, and it gets a second Access app whose destinations are exactly
+those paths. A path listed without a final `/*` is meant to be public on its own, so the paths
+under it are checked to still ask for sign-in.
 
 Ships one skill (`skills/portfolio-app/SKILL.md`) and the script it drives
 (`skills/portfolio-app/scripts/portfolio-app.mjs`), which is also the package's `portfolio-app`
@@ -68,6 +69,13 @@ is listed. Each path is one of:
 - an exact path under it, such as `/graph/public.txt`;
 - a directory under it with a final `/*`, such as `/graph/_next/*`.
 
+A path without a final `/*` is meant to be public on its own, not with what is under it:
+`/graph/public` does not make `/graph/public/x` public. Cloudflare's documentation leaves room
+for the children of such a path to inherit its Bypass (see the research notes), so the tool does
+not assume they stay private; it requests a child of each one and requires the Access login. If
+a child answers signed out, `--apply` stops and `verify` fails, naming that child. To make the
+children public too, list `<path>/*` as well.
+
 The leading `/` is optional. Refused before anything is read: a path outside the prefix,
 `/<prefix>/*` (the whole app; that is `--public`), a `*` anywhere but a final `/*`, empty, `.` or
 `..` segments, queries, and `--public` together with `--public-path`.
@@ -99,7 +107,9 @@ The Cloudflare Access step, in apply order:
    whatever name it has.
 4. **Wait for both answers.** With `--apply`, it waits until every private probe redirects to
    the Access login and every public path answers signed out (see `verify` below), and stops
-   before D1 or GitHub if that never happens.
+   before D1 or GitHub if that never happens. The private probes include a child of each public
+   path listed without a `/*`, so a run whose exact public paths turn out to open their
+   children stops here, with both Access apps already created; nothing is removed for you.
 
 D1 and GitHub follow as for a private app. Each step only fills in what is missing, so a mixed
 run on an app that already has its Allow app, D1 and secrets creates only the Bypass policy and
@@ -183,12 +193,23 @@ Until the package is published to npm, run the script from a checkout of this re
 `node packages/portfolio-app/skills/portfolio-app/scripts/portfolio-app.mjs verify …`.
 
 **A mixed app** passes the same `--public-path` list it was bootstrapped with, and then the check
-goes both ways. The private probes are `/<prefix>` (unless it is public),
-`/<prefix>/portfolio-app-verify` and `/<prefix>/api/portfolio-app-verify`, less any that a public
-path covers; each must redirect to the Access login. Each public path is probed as itself, or
-as `<dir>/portfolio-app-verify` for a `<dir>/*` path, and must answer without a redirect to any
-Access login. The app's own 404 counts as an answer. Without `--public-path`, `verify` behaves
-exactly as before.
+goes both ways. The probes run in this order:
+
+1. The private probes, each of which must redirect to the Access login: `/<prefix>`,
+   `/<prefix>/portfolio-app-verify`, `/<prefix>/api/portfolio-app-verify`, then
+   `<path>/portfolio-app-verify` for each public path listed without a `/*`, in the order
+   listed. Any of these that a listed public path covers is left out (`/<prefix>` when it is
+   public, a child when `<path>/*` is listed too), and one that appears twice is requested once.
+2. The public probes, in the order listed, each of which must answer without a redirect to any
+   Access login: an exact path as itself, a `<dir>/*` path as `<dir>/portfolio-app-verify`. The
+   app's own 404 counts as an answer.
+
+For graph-notes' six paths that is `/graph`, `/graph/portfolio-app-verify`,
+`/graph/api/portfolio-app-verify`, `/graph/public/portfolio-app-verify`,
+`/graph/public.txt/portfolio-app-verify` and `/graph/manifest.webmanifest/portfolio-app-verify`
+as private, then the six public probes. For time-track, the child of the public `/time-track` is
+`/time-track/portfolio-app-verify`, which is already a private probe. Without `--public-path`,
+`verify` behaves exactly as before.
 
 **Limit:** a public path that answers a bare `401` or `403` fails the check. Access can answer
 that way, and so can Cloudflare's bot protection when it refuses an automated client; from a
@@ -287,14 +308,29 @@ security add-generic-password -s portfolio-app -a cloudflare-deploy-token -w
   users".
 - **Order inside one app:** "Bypass and Service Auth policies are evaluated first", then Block
   and Allow.
-- **Overlapping apps:** for paths under one root, "the more specific rule … takes precedence,
-  and no rule is inherited" from the less specific one, and `example.com/alpha/*` does not
-  cover `example.com/alpha`.
+- **Overlapping apps:** the application-paths page says, in full: "When multiple rules are set
+  for a common root path, the more specific rule takes precedence. For example, when setting
+  rules for `dashboard.com/eng` and `dashboard.com/eng/exec` separately, the more specific rule
+  for `dashboard.com/eng/exec` takes precedence, and no rule is inherited from
+  `dashboard.com/eng`. If no separate, specific rule is set for `dashboard.com/eng/exec`, it
+  will inherit any rules set for `dashboard.com/eng`." On wildcards: "Using a wildcard in the
+  **Path** field does not cover the parent path nor the apex domain", so `example.com/alpha/*`
+  does not cover `example.com/alpha`.
+- **What the last sentence means for an exact public path:** a Bypass destination without a
+  wildcard, such as `<domain>/graph/public`, may also apply to `<domain>/graph/public/x`. That
+  child also matches the Allow app's `<domain>/graph/*`, and the page does not say which of the
+  two is "more specific". If the exact Bypass destination wins, the children of an exact public
+  path are public too. The tool does not settle this by reading: it probes
+  `<path>/portfolio-app-verify` for each public path listed without a `/*` and requires the
+  Access login, in `--apply` and in `verify`. A public bare prefix is not at risk in the same
+  way, since its children are the Allow app's own `<prefix>/*`, and they are probed as well.
 - **Not answered by the docs:**
   - which app applies when two apps hold the same destination. The tool never creates one:
     a listed destination held by any other app is a conflict.
   - whether the apps list always carries policies inline. Bypass detection reads a policy
     inline when it is there and otherwise looks it up by id in the policy list.
+  - whether an inherited exact destination or a matching `/*` destination of another app wins
+    for a child path (above). The child probes answer it on the live site.
 - **Not confirmed against a live account.**
 - Sources:
   - [reusable policy create](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/policies/methods/create/)

@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // portfolio-app — set up a new sub-app of the site, and check that it is behind Access.
 //
-//   portfolio-app bootstrap --repo <owner/name> --path /<prefix> [--public] [--d1 <name>] [--clone <dir>] [--apply]
-//   portfolio-app verify --path /<prefix> [--domain <host>] [--team <team>]
+//   portfolio-app bootstrap --repo <owner/name> --path /<prefix> [--public | --public-path <path>…] [--d1 <name>] [--clone <dir>] [--apply]
+//   portfolio-app verify --path /<prefix> [--public-path <path>…] [--domain <host>] [--team <team>]
 //
 // This file only wires the real world (fetch, child processes, the filesystem) into the
 // library under ./lib, where every function takes its dependencies as arguments.
@@ -13,21 +13,29 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
-import { normalizePrefix } from "./lib/prefix.mjs";
+import { normalizePrefix, normalizePublicPath } from "./lib/prefix.mjs";
 import { verifyPath } from "./lib/verify.mjs";
 import { applyBootstrap, formatPlan, planBootstrap } from "./lib/bootstrap.mjs";
 import { SETUP_TOKEN_ACCOUNT, defaultConfigPath, isInsideGitWorkTree, keychainRead, parseConfig } from "./lib/local.mjs";
 
 const USAGE = `usage:
-  portfolio-app bootstrap --repo <owner/name> --path /<prefix> [--public] [--d1 <name>]
-                          [--clone <dir>] [--config <file>] [--apply]
+  portfolio-app bootstrap --repo <owner/name> --path /<prefix> [--public | --public-path <path>…]
+                          [--d1 <name>] [--clone <dir>] [--config <file>] [--apply]
       Plans (default) or applies (--apply) the setup steps for a sub-app:
       a Cloudflare Access app for the path, its D1 database id in backend/wrangler.jsonc,
       and the GitHub "production" environment secrets.
       --public makes the path reachable by anyone: no Access step; instead the R2 bucket
       named in wrangler.jsonc and Worker routes for exactly /<prefix> and /<prefix>/*.
-  portfolio-app verify --path /<prefix> [--domain <host>] [--team <team>] [--config <file>]
-      Exits 0 only when the path redirects to Cloudflare Access. Needs no token.
+      --public-path (repeatable) makes a mixed app: signed in by default, plus a Bypass
+      app "<repo name> (public)" on exactly the listed paths. Each is /<prefix>,
+      /<prefix>/<path> or /<prefix>/<path>/*, inside the prefix. A path without /* is
+      public on its own; a path under it is checked to still ask for sign-in.
+  portfolio-app verify --path /<prefix> [--public-path <path>…] [--domain <host>] [--team <team>]
+                       [--config <file>]
+      Exits 0 only when the path redirects to Cloudflare Access (with --public-path:
+      the private paths, a child of each exact public path among them, redirect and
+      every listed public path answers signed out).
+      Needs no token.
 
 exit codes: 0 ok · 1 verify failed or a step failed · 2 usage error or plan conflict`;
 
@@ -38,6 +46,19 @@ export function runProcess(cmd, args, { input } = {}) {
 }
 
 class UsageError extends Error {}
+
+/** The listed public paths, normalized and de-duplicated; refuses `--public` with them. */
+function publicPathsArg(values, prefix) {
+  const raw = values["public-path"] ?? [];
+  if (raw.length > 0 && values.public) {
+    throw new UsageError("--public and --public-path do not mix: --public opens the whole prefix, --public-path only the listed paths");
+  }
+  try {
+    return [...new Set(raw.map((p) => normalizePublicPath(p, prefix)))];
+  } catch (err) {
+    throw new UsageError(err.message);
+  }
+}
 
 function prefixArg(raw) {
   try {
@@ -60,6 +81,7 @@ function loadConfig(path, run) {
 async function verifyCommand(values, { fetch, run, log }) {
   if (!values.path) throw new UsageError("verify needs --path /<prefix>");
   const prefix = prefixArg(values.path);
+  const publicPaths = publicPathsArg(values, prefix);
   let { domain, team } = values;
   if (!domain) {
     const configPath = values.config ?? defaultConfigPath();
@@ -68,9 +90,14 @@ async function verifyCommand(values, { fetch, run, log }) {
     domain = config.domain;
     team ??= config.team;
   }
-  const { ok, results } = await verifyPath({ fetch, domain, prefix, team });
+  const { ok, results } = await verifyPath({ fetch, domain, prefix, team, publicPaths });
   for (const r of results) log(`${r.ok ? "✓" : "✗"} ${r.url} ${r.reason}`);
-  log(ok ? `${domain}${prefix} is behind Cloudflare Access` : `${domain}${prefix} is NOT behind Cloudflare Access — refusing`);
+  if (publicPaths.length > 0) {
+    log(ok ? `${domain}${prefix} is behind Cloudflare Access, and its ${publicPaths.length} public path(s) answer signed out`
+      : `${domain}${prefix} is NOT set up as a mixed app (sign-in except ${publicPaths.join(", ")}) — refusing`);
+  } else {
+    log(ok ? `${domain}${prefix} is behind Cloudflare Access` : `${domain}${prefix} is NOT behind Cloudflare Access — refusing`);
+  }
   return ok ? 0 : 1;
 }
 
@@ -80,10 +107,11 @@ async function bootstrapCommand(values, { fetch, run, log }) {
   }
   if (!values.path) throw new UsageError("bootstrap needs --path /<prefix>");
   const prefix = prefixArg(values.path);
+  const publicPaths = publicPathsArg(values, prefix);
   const config = loadConfig(values.config ?? defaultConfigPath(), run);
   const cf = { fetch, accountId: config.accountId, token: keychainRead(run, SETUP_TOKEN_ACCOUNT) };
   const opts = { repo: values.repo, prefix, cloneDir: resolve(values.clone ?? "."), d1Flag: values.d1,
-    public: values.public, config };
+    public: values.public, publicPaths, config };
 
   const actions = await planBootstrap({ cf, run, fetch }, opts);
   const hasConflict = actions.some((a) => a.state === "conflict");
@@ -107,6 +135,7 @@ export async function main(argv, deps) {
         path: { type: "string" },
         d1: { type: "string" },
         public: { type: "boolean", default: false },
+        "public-path": { type: "string", multiple: true },
         clone: { type: "string" },
         config: { type: "string" },
         domain: { type: "string" },

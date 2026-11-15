@@ -36,6 +36,52 @@ export function accessDestinations(domain, prefix) {
   return [`${domain}${prefix}`, `${domain}${prefix}/*`];
 }
 
+const PUBLIC_SEGMENT = /^[A-Za-z0-9._~-]+$/;
+
+/**
+ * A mixed app's public path, as `/<prefix>`, `/<prefix>/<path>` or `/<prefix>/<path>/*`,
+ * or throws saying why it is refused. Public paths are always named, never inferred, and
+ * may not reach outside the app's own prefix or cover all of it (that is `--public`).
+ */
+export function normalizePublicPath(raw, prefix) {
+  const input = String(raw ?? "").trim();
+  const path = `/${input.replace(/^\/+/, "")}`;
+  const refuse = (why) => new Error(`refusing public path "${input}": ${why}`);
+  const wildcard = path.endsWith("/*");
+  const body = wildcard ? path.slice(0, -2) : path;
+  const segments = body.split("/").slice(1);
+  if (path.includes("*") && (!wildcard || body.includes("*"))) {
+    throw refuse(`the only wildcard allowed is a final "/*"`);
+  }
+  if (segments.some((s) => !PUBLIC_SEGMENT.test(s) || s === "." || s === "..")) {
+    throw refuse(`use letters, digits, ".", "_", "~" or "-" in each segment — no empty, "." or ".." segments, queries or spaces`);
+  }
+  if (body !== prefix && !body.startsWith(`${prefix}/`)) {
+    throw refuse(`it is outside the app's prefix ${prefix}`);
+  }
+  if (wildcard && body === prefix) {
+    throw refuse(`${prefix}/* is the whole app; an app anyone can reach is --public, not a public path`);
+  }
+  return path;
+}
+
+/** Whether a destination path (`/a/b` or `/a/b/*`) covers the request path `path`. */
+export function pathCovers(destination, path) {
+  return destination.endsWith("/*") ? path.startsWith(destination.slice(0, -1)) : path === destination;
+}
+
+/**
+ * A mixed app's Allow destinations: the usual two, less any that is itself listed as
+ * public (`/time-track` public leaves `<domain>/time-track/*` behind sign-in).
+ */
+export function privateDestinations(domain, prefix, publicPaths) {
+  return accessDestinations(domain, prefix).filter((uri) => !publicPaths.some((p) => `${domain}${p}` === uri));
+}
+
+export function publicDestinations(domain, publicPaths) {
+  return publicPaths.map((p) => `${domain}${p}`);
+}
+
 /**
  * How an existing Worker route pattern relates to the paths an app at `prefix` claims
  * (`/<prefix>` and everything under it), on `domain`:

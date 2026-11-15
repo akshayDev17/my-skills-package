@@ -97,8 +97,9 @@ To refresh the copy after a change to the server in graph-notes:
 ## Tests
 
 - `test/test_plugin.py` runs the exact command in `.mcp.json`, with the plugin root and data
-  directory filled in as Claude Code does. A real MCP client talks to it over stdio, and the server reads a graph from a
-  stand-in app on a local port through a stand-in `cloudflared`. CI runs it:
+  directory filled in as Claude Code does. A real MCP client talks to it over stdio, and the
+  server reads a graph from a stand-in app on a local port through a stand-in `cloudflared`.
+  CI runs it:
 
   ```sh
   uv run --frozen --project plugins/graph-notes/server pytest plugins/graph-notes/test

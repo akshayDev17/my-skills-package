@@ -35,26 +35,25 @@ const denied = () => jsonResponse(403, { success: false, errors: [{ code: 10000,
 
 /**
  * Whether an Access destination covers `host/path`: exact, `…/*`, or a bare host (all of
- * it). With `inheritExact`, a destination without a wildcard also covers everything
- * under it, as Cloudflare's application-paths page says a sub-path with no rule of its
- * own inherits its parent's.
+ * it). A destination without a wildcard also covers everything under it, as Cloudflare
+ * does: a sub-path with no rule of its own inherits its parent's (the application-paths
+ * page says so, and the live account showed it on 2026-11-15).
  */
-const destinationCovers = (uri, target, inheritExact) =>
+const destinationCovers = (uri, target) =>
   uri.endsWith("/*") ? target.startsWith(uri.slice(0, -1))
     : !uri.includes("/") ? target.split("/")[0] === uri
-    : target === uri || (inheritExact && target.startsWith(`${uri}/`));
+    : target === uri || target.startsWith(`${uri}/`);
 
 /**
  * How the fake site's Access answers a request, as Cloudflare does: the app with the
  * most specific (longest) matching destination decides; Bypass on every policy lets
  * anyone in, anything else asks for sign-in. Apps with no policies count as Allow.
- * `state.inheritExact` turns on inheritance from a destination without a wildcard.
  */
 function accessAnswer(state, target) {
   let best = null;
   for (const app of state.apps ?? []) {
     for (const uri of appUris(app)) {
-      if (destinationCovers(uri, target, state.inheritExact) && (!best || uri.length > best.uri.length)) best = { app, uri };
+      if (destinationCovers(uri, target) && (!best || uri.length > best.uri.length)) best = { app, uri };
     }
   }
   if (!best) return null;
@@ -64,9 +63,9 @@ function accessAnswer(state, target) {
 
 /**
  * A fake Cloudflare account plus the public site. `state` is mutated by POSTs so an
- * apply followed by a plan sees what apply created. `state.deny` lists the API areas
- * ("r2", "zone", "routes", "scripts") the setup token has no permission for, and
- * `state.inheritExact` makes the children of an exact Access destination inherit it.
+ * apply followed by a plan sees what apply created, and a PUT replaces an app with the
+ * body sent, as Cloudflare's does. `state.deny` lists the API areas ("r2", "zone",
+ * "routes", "scripts") the setup token has no permission for.
  */
 export function fakeFetch(state) {
   const calls = [];
@@ -100,6 +99,14 @@ export function fakeFetch(state) {
       const app = { id: `app-${state.apps.length + 1}`, ...JSON.parse(init.body) };
       state.apps.push(app);
       return jsonResponse(200, { success: true, result: app });
+    }
+    const oneApp = path.match(new RegExp(`^${base}/access/apps/([^/]+)$`));
+    const appIndex = oneApp ? state.apps.findIndex((a) => a.id === decodeURIComponent(oneApp[1])) : -1;
+    if (oneApp && appIndex === -1) return jsonResponse(404, { success: false, errors: [{ code: 12130, message: "access.api.error.not_found" }] });
+    if (oneApp && method === "GET") return jsonResponse(200, { success: true, result: state.apps[appIndex] });
+    if (oneApp && method === "PUT") {
+      state.apps[appIndex] = { ...JSON.parse(init.body), id: state.apps[appIndex].id };
+      return jsonResponse(200, { success: true, result: state.apps[appIndex] });
     }
     if (path === `${base}/d1/database` && method === "GET") {
       const name = u.searchParams.get("name");

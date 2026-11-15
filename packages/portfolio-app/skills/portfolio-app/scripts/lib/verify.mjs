@@ -9,8 +9,9 @@
 // every private probe must redirect to the Access login, and every listed public path
 // must answer signed out. Its private probes add `<prefix>/api/…`, since an app's API
 // is the path a too-wide public entry would most likely expose, and a child of every
-// public path listed without a `/*`: Cloudflare documents that a sub-path with no rule
-// of its own inherits its parent's, so only a probe shows whether the children of an
+// public path listed without a `/*`: a sub-path with no rule of its own inherits its
+// parent's (documented, and seen on the live account on 2026-11-15), so bootstrap gives the
+// Allow app a narrowing `<path>/*` for each one, and the probe shows the children of an
 // exact public path still ask for sign-in.
 
 import { pathCovers } from "./prefix.mjs";

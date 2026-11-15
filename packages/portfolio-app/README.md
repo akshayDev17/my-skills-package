@@ -5,8 +5,9 @@ behind Cloudflare Access before every deploy. A sub-app meant for everyone can i
 as a public app with `--public`, which skips Access and gives it an R2 bucket and Worker routes.
 A sub-app that is signed in by default but has a few public paths is a mixed app: name each
 public path with `--public-path`, and it gets a second Access app whose destinations are exactly
-those paths. A path listed without a final `/*` is meant to be public on its own, so the paths
-under it are checked to still ask for sign-in.
+those paths. A path listed without a final `/*` is meant to be public on its own, so its Allow
+app also gets a narrowing `<path>/*` that keeps the paths under it behind sign-in, and they are
+checked to still ask for it.
 
 Ships one skill (`skills/portfolio-app/SKILL.md`) and the script it drives
 (`skills/portfolio-app/scripts/portfolio-app.mjs`), which is also the package's `portfolio-app`
@@ -70,11 +71,16 @@ is listed. Each path is one of:
 - a directory under it with a final `/*`, such as `/graph/_next/*`.
 
 A path without a final `/*` is meant to be public on its own, not with what is under it:
-`/graph/public` does not make `/graph/public/x` public. Cloudflare's documentation leaves room
-for the children of such a path to inherit its Bypass (see the research notes), so the tool does
-not assume they stay private; it requests a child of each one and requires the Access login. If
-a child answers signed out, `--apply` stops and `verify` fails, naming that child. To make the
-children public too, list `<path>/*` as well.
+`/graph/public` does not make `/graph/public/x` public. Cloudflare lets a sub-path inherit its
+parent path's rule, so on its own an exact Bypass destination opens its children too (seen on
+the live account; see the research notes). So the Allow app gets a **narrowing destination**
+`<path>/*` for each such path: `/graph/public` adds `<domain>/graph/public/*`. It is more specific
+than the inherited `<domain>/graph/public`, so the children ask for sign-in while the path itself
+stays public. None is added for the bare prefix, whose children are the Allow app's own
+`<prefix>/*` already, nor for a path whose children another listed `/*` path makes public. The
+tool still requests a child of each exact public path and requires the Access login; if one
+answers signed out, `--apply` stops and `verify` fails, naming that child. To make the children
+public too, list `<path>/*` as well.
 
 The leading `/` is optional. Refused before anything is read: a path outside the prefix,
 `/<prefix>/*` (the whole app; that is `--public`), a `*` anywhere but a final `/*`, empty, `.` or
@@ -85,19 +91,53 @@ The leading `/` is optional. Refused before anything is read: a path outside the
 portfolio-app bootstrap --repo owner/time-track --path /time-track \
   --public-path /time-track --public-path '/time-track/_next/*' --clone ../time-track
 
-# graph-notes: its Allow app and D1 already exist, so only the public app is new
+# graph-notes: its Allow app and D1 came first; a first mixed run on such an app adds the
+# public app, and the narrowing destinations for its three exact public paths to the Allow app
 portfolio-app bootstrap --repo owner/graph-notes --path /graph \
   --public-path /graph/public --public-path /graph/public.txt --public-path '/graph/_next/*' \
   --public-path '/graph/icons/*' --public-path /graph/manifest.webmanifest \
   --public-path '/graph/api/public/*' --clone ../graph-notes
 ```
 
+Both apps are set up on the live account now, so re-running either command plans zero changes.
+graph-notes' Allow app already holds its three narrowing destinations (the owner approved adding
+them on 2026-11-15) and its public app matches the list; its Access section reads:
+
+```
+  ✓ reusable policy "portfolio-app sign-in" exists
+  ✓ Access app "graph-notes (/graph)" guards example.com/graph + example.com/graph/* + example.com/graph/public/* + example.com/graph/public.txt/* + example.com/graph/manifest.webmanifest/*
+  ✓ Bypass app "graph-notes (public)" lets anyone reach example.com/graph/public + example.com/graph/public.txt + example.com/graph/_next/* + example.com/graph/icons/* + example.com/graph/manifest.webmanifest + example.com/graph/api/public/*
+  · who answers (…): one line per destination, as below
+  ✓ /graph already redirects to <team>.cloudflareaccess.com, and its public paths answer signed out
+…
+nothing to create — already bootstrapped
+```
+
+time-track's only exact public path is the bare prefix, so it has no narrowing destination:
+
+```
+  ✓ reusable policy "portfolio-app sign-in" exists
+  ✓ Access app "time-track (/time-track)" guards example.com/time-track/*
+  ✓ Bypass app "time-track (public)" lets anyone reach example.com/time-track + example.com/time-track/_next/*
+  · who answers (…)
+  ✓ /time-track already redirects to <team>.cloudflareaccess.com, and its public paths answer signed out
+…
+nothing to create — already bootstrapped
+```
+
 The Cloudflare Access step, in apply order:
 
-1. **The Allow app**, as for a private app, on `<domain>/<prefix>` and `<domain>/<prefix>/*`.
-   If `/<prefix>` itself is public, that destination is left out, so time-track's Allow app holds
-   only `<domain>/time-track/*`. An existing Allow app with exactly those destinations is reused
-   and never edited.
+1. **The Allow app**, as for a private app, on `<domain>/<prefix>` and `<domain>/<prefix>/*`,
+   plus a narrowing `<domain><path>/*` for each exact public path (above). If `/<prefix>` itself
+   is public, that destination is left out, so time-track's Allow app holds only
+   `<domain>/time-track/*`. An existing Allow app that holds the base destinations and some or
+   none of the narrowing ones is reused, and the plan shows
+   `+ add narrowing destination(s) … to "<app>"` for the missing ones. That is the one change the
+   tool makes to an existing app, because it only shrinks what is public. Apply reads the app
+   again, refuses if its destinations changed since the plan, and sends it back with `PUT` (which
+   replaces the whole app) carrying every current setting, the same policies by id and
+   precedence, and only the missing destinations added. It never removes or alters any other
+   destination, policy or setting. This comes before the Bypass app, so no child is ever public.
 2. **The Bypass policy.** Find or create one reusable policy named `portfolio-app public`, with
    decision *bypass* and the single include rule *Everyone*. If a policy by that name exists and
    is anything else, the plan is a conflict; the tool does not rewrite it.
@@ -117,23 +157,33 @@ The Cloudflare Access step, in apply order:
    both pass or the attempts run out.
 
 D1 and GitHub follow as for a private app. Each step only fills in what is missing, so a mixed
-run on an app that already has its Allow app, D1 and secrets creates only the Bypass policy and
-app.
+run on an app that already has its Allow app, D1 and secrets adds only the narrowing
+destinations it lacks, and the Bypass policy and app.
 
 **Which app answers which path.** When several Access apps match a request, the one with the
 most specific matching destination applies, and within one app Bypass policies are evaluated
 before Allow. A listed destination under the prefix is more specific than the Allow app's
 `<prefix>/*`, so the Bypass app wins there; a public `/<prefix>` is left out of the Allow app, so
-only the Bypass app holds it. Everything else under the prefix is expected to go to the Allow
-app. That is not certain for the paths under a public path listed without `/*`, which may
-inherit its Bypass (see the research notes), so a child of each one is probed and must still ask
-for sign-in. The plan prints the intended answer per destination:
+only the Bypass app holds it. The paths under an exact public path would inherit its Bypass, so
+its narrowing destination, more specific again, sends them to the Allow app. Everything else
+under the prefix goes to the Allow app's `<prefix>/*`. A child of each exact public path is still
+probed and must ask for sign-in. The plan prints the intended answer per destination:
 
 ```
   · who answers (the app with the most specific matching destination wins; Bypass lets anyone in, Allow asks for sign-in):
   ·   example.com/time-track → "time-track (public)" — Bypass, anyone
   ·   example.com/time-track/_next/* → "time-track (public)" — Bypass, anyone
   ·   example.com/time-track/* (the rest) → "time-track (/time-track)" — Allow, sign-in
+```
+
+and, for graph-notes, after its six Bypass lines:
+
+```
+  ·   example.com/graph → "graph-notes (/graph)" — Allow, sign-in
+  ·   example.com/graph/public/* (narrowing) → "graph-notes (/graph)" — Allow, sign-in
+  ·   example.com/graph/public.txt/* (narrowing) → "graph-notes (/graph)" — Allow, sign-in
+  ·   example.com/graph/manifest.webmanifest/* (narrowing) → "graph-notes (/graph)" — Allow, sign-in
+  ·   example.com/graph/* (the rest) → "graph-notes (/graph)" — Allow, sign-in
 ```
 
 A `/*` destination does not cover its own base: `/graph/_next/*` makes `/graph/_next/a.js` public,
@@ -151,7 +201,13 @@ ok, `1` a step failed, `2` usage error or a conflict in the plan.
 - **Refused prefixes:** an empty prefix, `/`, and anything under ai-chat-archive's site-wide
   `/api`, `/_next` or `/vendors`. Also refused: wildcards, dots, queries and uppercase.
 - **Conflicts (`✗`), where nothing is applied:**
-  - an existing Access app that overlaps the two destinations without matching them exactly;
+  - an existing Access app that overlaps the two destinations without matching them exactly
+    (for a mixed app: one holding anything beyond the base and narrowing destinations, such as a
+    narrowing destination for a path no longer listed);
+  - with `--public-path`, an existing Allow app that lacks a narrowing destination but cannot take
+    one by a plain `PUT`: one that is not self-hosted, holds its paths in the deprecated
+    `self_hosted_domains`, holds a destination that is not a public hostname, or has a Bypass
+    policy (a destination added to it would not ask for sign-in);
   - with `--public`, any Access app on the destinations, or a path that already redirects to
     an Access login;
   - with `--public-path`: an app other than the public app that already holds a listed path (a
@@ -215,7 +271,8 @@ goes both ways. The probes run in this order:
 For graph-notes' six paths that is `/graph`, `/graph/portfolio-app-verify`,
 `/graph/api/portfolio-app-verify`, `/graph/public/portfolio-app-verify`,
 `/graph/public.txt/portfolio-app-verify` and `/graph/manifest.webmanifest/portfolio-app-verify`
-as private, then the six public probes. For time-track, the child of the public `/time-track` is
+as private, then the six public probes. The three children pass only because the Allow app holds
+their narrowing destinations. For time-track, the child of the public `/time-track` is
 `/time-track/portfolio-app-verify`, which is already a private probe. Without `--public-path`,
 `verify` behaves exactly as before.
 
@@ -325,25 +382,36 @@ security add-generic-password -s portfolio-app -a cloudflare-deploy-token -w
   **Path** field does not cover the parent path nor the apex domain", so `example.com/alpha/*`
   does not cover `example.com/alpha`.
 - **What the last sentence means for an exact public path:** a Bypass destination without a
-  wildcard, such as `<domain>/graph/public`, may also apply to `<domain>/graph/public/x`. That
+  wildcard, such as `<domain>/graph/public`, also applies to `<domain>/graph/public/x`. That
   child also matches the Allow app's `<domain>/graph/*`, and the page does not say which of the
-  two is "more specific". If the exact Bypass destination wins, the children of an exact public
-  path are public too. The tool does not settle this by reading: it probes
-  `<path>/portfolio-app-verify` for each public path listed without a `/*` and requires the
-  Access login, in `--apply` and in `verify`. A public bare prefix is not at risk in the same
-  way, since its children are the Allow app's own `<prefix>/*`, and they are probed as well.
+  two is "more specific".
+- **Inheritance confirmed on the live account, 2026-11-15.** With a Bypass app holding the exact
+  path `graph/public` and the Allow app holding `graph/*`, `graph/public/<anything>` answered
+  signed out: the exact Bypass destination won. The tool's child probe caught it and stopped
+  `--apply`, as designed. With the owner's approval, `graph/public/*`, `graph/public.txt/*` and
+  `graph/manifest.webmanifest/*` were then added to the existing Allow app
+  `graph-notes (/graph)`; after that, a child of each exact public path redirected to the Access
+  login while the exact paths stayed public. So the more specific `<path>/*` beats the inherited
+  exact destination, and the tool now adds that narrowing destination itself for every exact
+  public path but the bare prefix, whose children the Allow app's own `<prefix>/*` already
+  answers. It still probes `<path>/portfolio-app-verify` for each one, in `--apply` and in
+  `verify`.
+- **Updating an app:** `PUT /accounts/{account_id}/access/apps/{app_id}` replaces the app with
+  the body sent; it is not a patch. So the tool reads the app with
+  `GET /accounts/{account_id}/access/apps/{app_id}` and sends back all of it, with policies as
+  `{ id, precedence }` links and only the narrowing destinations added.
 - **Not answered by the docs:**
   - which app applies when two apps hold the same destination. The tool never creates one:
     a listed destination held by any other app is a conflict.
   - whether the apps list always carries policies inline. Bypass detection reads a policy
     inline when it is there and otherwise looks it up by id in the policy list.
-  - whether an inherited exact destination or a matching `/*` destination of another app wins
-    for a child path (above). The child probes answer it on the live site.
-- **Not confirmed against a live account.**
+- **Confirmed against the live account:** the inheritance above, and that a narrowing
+  `<path>/*` on the Allow app beats it (2026-11-15). The rest is from the docs only.
 - Sources:
   - [reusable policy create](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/policies/methods/create/)
   - [Access policies, order of execution](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/)
   - [application paths](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/)
+  - [update app](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/applications/methods/update/)
 
 ### R2 buckets and Worker routes (read 2026-11-02)
 

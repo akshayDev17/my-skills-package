@@ -12,6 +12,8 @@
 //   applications       GET/POST /accounts/{id}/access/apps  — `destinations` supersedes
 //                      the deprecated `self_hosted_domains`; `policies: [{ id, precedence }]`
 //                      links reusable policies, and reusable + inline are mutually exclusive.
+//                      GET/PUT /accounts/{id}/access/apps/{app_id} reads one app and
+//                      replaces it: PUT takes the app's full settings, not a patch.
 //   D1                 GET/POST /accounts/{id}/d1/database
 //   R2                 GET /accounts/{id}/r2/buckets/{name}, POST /accounts/{id}/r2/buckets
 //   zones              GET /zones?name=<domain>
@@ -112,6 +114,27 @@ export async function createSelfHostedApp(cf, { name, uris, policyId }) {
     session_duration: "24h",
   });
   return json.result;
+}
+
+export async function getAccessApp(cf, appId) {
+  return (await cfRequest(cf, "GET", `/accounts/${cf.accountId}/access/apps/${encodeURIComponent(appId)}`)).result;
+}
+
+/** PUT replaces the whole app, so `app` is its full current settings with the change applied. */
+export async function updateAccessApp(cf, appId, app) {
+  return (await cfRequest(cf, "PUT", `/accounts/${cf.accountId}/access/apps/${encodeURIComponent(appId)}`, app)).result;
+}
+
+/**
+ * `app`'s full settings with `uris` appended to its destinations, every other field as it
+ * was. Its policies are sent as `{ id, precedence }` links, keeping each id and precedence.
+ */
+export function withAddedDestinations(app, uris) {
+  return {
+    ...app,
+    destinations: [...app.destinations, ...uris.map((uri) => ({ type: "public", uri }))],
+    policies: (app.policies ?? []).map((p, i) => ({ id: p.id, precedence: p.precedence ?? i + 1 })),
+  };
 }
 
 export async function findD1(cf, name) {

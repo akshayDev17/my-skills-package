@@ -17,9 +17,19 @@ TOOLS = {
     "about_graphs", "list_graphs", "read_graph", "list_history", "list_trash",
     "create_graph", "copy_graph", "rename_graph", "set_visibility", "restore_version",
     "trash_graph", "restore_from_trash",
-    "add_notes", "update_notes", "remove_notes", "link_notes", "unlink_notes",
-    "add_group_boxes", "update_group_boxes", "remove_group_boxes",
+    "add_notes", "update_notes", "remove_notes", "link_notes", "unlink_notes", "update_links", "style_notes",
+    "add_group_boxes", "update_group_boxes", "remove_group_boxes", "move_notes", "download_for_obsidian",
 }
+
+
+def properties(schema: object) -> set[str]:
+    """Every property name anywhere in a JSON schema."""
+    if isinstance(schema, dict):
+        names = set(schema.get("properties") or {}) if isinstance(schema.get("properties"), dict) else set()
+        return names | {name for value in schema.values() for name in properties(value)}
+    if isinstance(schema, list):
+        return {name for value in schema for name in properties(value)}
+    return set()
 
 
 @pytest.fixture
@@ -38,9 +48,11 @@ def test_the_tools_are_the_graph_features_and_none_deletes_forever(app):
     tools = asyncio.run(listed())
     assert {t.name for t in tools} == TOOLS
     assert all(t.description and len(t.description) > 40 for t in tools)
-    # Nothing a model must send is in canvas terms.
+    # Nothing a model must send is in canvas terms, and only moving things by hand takes a place or a size.
     schemas = json.dumps([t.input_schema for t in tools]).lower()
-    assert not any(word in schemas for word in ("fromnode", "tonode", "width", "height", '"x"', "canvas json"))
+    assert not any(word in schemas for word in ("fromnode", "tonode", "styleattributes", "canvas json"))
+    geometry = {"x", "y", "width", "height"}
+    assert {t.name for t in tools if properties(t.input_schema) & geometry} == {"move_notes"}
 
 
 def test_the_about_graphs_tool_explains_a_graph(app):
@@ -264,7 +276,7 @@ def test_the_client_can_send_nothing_but_its_routes_and_no_slug_can_escape_its_p
                 app.call(tool, slug=slug, **more)
     assert len(app.edge.requests) == sent  # refused before anything was sent
     for method, path in (("DELETE", "/trash/plan"), ("DELETE", "/graphs/plan/versions/1"), ("DELETE", "/graphs"),
-                         ("GET", "/export"), ("POST", "/trash/plan"), ("PATCH", "/graphs/plan")):
+                         ("POST", "/export"), ("GET", "/export?all=1"), ("POST", "/trash/plan"), ("PATCH", "/graphs/plan")):
         with pytest.raises(client.ApiError, match="not something this server does"):
             client.call(app.api, method, path)
     assert len(app.edge.requests) == sent
@@ -303,14 +315,92 @@ def test_group_boxes_are_drawn_changed_and_removed_and_each_call_is_one_version(
     assert [b["id"] for b in graph["group_boxes"]] == [inference["id"]] and len(graph["notes"]) == 8
 
 
+def test_notes_boxes_and_links_are_styled_and_links_changed_in_place_each_call_one_version(app):
+    new_graph(app)
+    added = app.call("add_notes", slug="plan", version=1, notes=[{"text": "A", "key": "a"}, {"text": "B", "key": "b"}],
+                     links=[{"from_note": "a", "to_note": "b", "label": "to", "direction": "backward", "color": "red",
+                             "line": "dashed", "path": "right-angles", "from_side": "bottom", "to_side": "top"}])
+    a, b = (n["id"] for n in added["added"])
+    link = added["links_added"][0]
+    assert link == {"id": link["id"], "from_note": a, "to_note": b, "direction": "backward", "label": "to", "color": "red",
+                    "line": "dashed", "path": "right-angles", "from_side": "bottom", "to_side": "top"}
+    boxed = app.call("add_group_boxes", slug="plan", version=2, boxes=[{"label": "Pair", "notes": [a, b]}])
+    box = boxed["added"][0]["id"]
+
+    styled = app.call("style_notes", slug="plan", version=3, notes=[
+        {"id": a, "color": "#3A4BD8", "border": "dashed", "shape": "database", "text_align": "center"}, {"id": box, "color": "yellow"}])
+    assert styled["version"] == 4
+    assert styled["styled"] == [{"id": a, "color": "#3a4bd8", "border": "dashed", "shape": "database", "text_align": "center"},
+                                {"id": box, "color": "yellow"}]
+    stored = {n["id"]: n for n in app.edge.canvas("plan")["nodes"]}
+    assert stored[a]["color"] == "#3a4bd8" and stored[a]["styleAttributes"] == {"border": "dashed", "shape": "database", "textAlign": "center"}
+    assert stored[box]["color"] == "3" and "styleAttributes" not in stored[box]
+
+    changed = app.call("update_links", slug="plan", version=4, links=[
+        {"id": link["id"], "label": "", "direction": "both", "color": "none", "line": "solid", "path": "straight",
+         "from_side": "right", "to_side": "left"}])
+    assert changed["version"] == 5
+    assert changed["updated"] == [{"id": link["id"], "from_note": a, "to_note": b, "direction": "both", "path": "straight",
+                                   "from_side": "right", "to_side": "left"}]
+    assert app.edge.canvas("plan")["edges"] == [{"id": link["id"], "fromNode": a, "fromSide": "right", "toNode": b, "toSide": "left",
+                                                 "styleAttributes": {"pathfindingMethod": "direct"}, "fromEnd": "arrow"}]
+    graph = app.call("read_graph", slug="plan")
+    assert graph["links"] == changed["updated"] and graph["group_boxes"][0]["color"] == "yellow"
+    assert graph["notes"][0] == {"id": a, "text": "A", "clusters": ["pair"], **styled["styled"][0]}
+
+    with pytest.raises(ToolError, match="is a group box: it takes a colour"):
+        app.call("style_notes", slug="plan", version=5, notes=[{"id": box, "shape": "pill"}])
+    with pytest.raises(ToolError, match="'nope' names no link"):
+        app.call("update_links", slug="plan", version=5, links=[{"id": "nope", "label": "x"}])
+    with pytest.raises(ToolError, match="from_side and to_side go together"):
+        app.call("update_links", slug="plan", version=5, links=[{"id": link["id"], "to_side": "top"}])
+    with pytest.raises(ToolError):
+        app.call("update_links", slug="plan", version=5, links=[{"id": link["id"], "from_side": "auto", "to_side": "auto"}])
+    with pytest.raises(ToolError):
+        app.call("link_notes", slug="plan", version=5, links=[{"from_note": a, "to_note": b, "from_side": "auto", "to_side": "top"}])
+    assert app.call("read_graph", slug="plan")["version"] == 5
+
+
+def test_notes_and_boxes_are_moved_and_resized_by_hand_and_boxes_nest(app):
+    new_graph(app)
+    steps = app.call("add_notes", slug="plan", version=1, notes=[{"text": f"Step {i}", "key": f"s{i}"} for i in range(1, 5)],
+                     links=[{"from_note": f"s{i}", "to_note": f"s{i + 1}"} for i in range(1, 4)])
+    ids = [n["id"] for n in steps["added"]]
+    boxed = app.call("add_group_boxes", slug="plan", version=2, boxes=[
+        {"label": "Index", "notes": ids[:2], "key": "index"}, {"label": "Query", "notes": ids[2:], "key": "query"},
+        {"label": "RAG", "notes": ["index", "query"]}])
+    index, query, rag = boxed["added"]
+    assert rag["boxes"] == [index["id"], query["id"]] and rag["contains"] == ids and boxed["moved"] == []
+    laid = app.call("read_graph", slug="plan", layout=True)
+    where = {n["id"]: n for n in laid["notes"] + laid["group_boxes"]}
+    assert {"x", "y", "width", "height"} <= set(where[ids[0]]) and "x" not in app.call("read_graph", slug="plan")["notes"][0]
+
+    moved = app.call("move_notes", slug="plan", version=3, notes=[
+        {"id": rag["id"], "x": where[rag["id"]]["x"] + 100, "y": where[rag["id"]]["y"] + 50},
+        {"id": ids[3], "width": 300, "height": 160}])
+    assert moved["version"] == 4 and "notices" not in moved
+    placed = {p["id"]: p for p in moved["placed"]}
+    assert set(placed) == {rag["id"], index["id"], query["id"], *ids}  # the box carried both boxes and every note
+    assert placed[ids[0]]["x"] == where[ids[0]]["x"] + 100 and (placed[ids[3]]["width"], placed[ids[3]]["height"]) == (300, 160)
+    out = app.call("move_notes", slug="plan", version=4, notes=[{"id": ids[0], "x": placed[ids[0]]["x"], "y": placed[rag["id"]]["y"] - 400}])
+    assert out["notices"] == [f"'{ids[0]}' left a group box, so it is no longer in cluster '{c}'" for c in ("rag", "index")]  # in canvas order: RAG is written before the boxes it holds
+    with pytest.raises(ToolError, match="greater than or equal to 40"):
+        app.call("move_notes", slug="plan", version=5, notes=[{"id": ids[0], "width": 10}])
+    assert app.call("read_graph", slug="plan")["version"] == 5
+
+
 @pytest.mark.parametrize("tool, arguments", [
+    ("move_notes", {"notes": [{"id": "n", "x": 5}]}),
+    ("style_notes", {"notes": [{"id": "n", "color": "red"}]}),
+    ("update_links", {"links": [{"id": "e", "label": "late"}]}),
     ("add_group_boxes", {"boxes": [{"label": "Late", "notes": ["n"]}]}),
     ("update_group_boxes", {"boxes": [{"id": "g", "label": "Late"}]}),
     ("remove_group_boxes", {"box_ids": ["g"]}),
 ])
-def test_a_box_change_from_an_outdated_version_saves_nothing(app, tool, arguments):
+def test_a_change_from_an_outdated_version_saves_nothing(app, tool, arguments):
     app.edge.seed("plan", {"nodes": [{"id": "g", "type": "group", "label": "G", "x": -20, "y": -56, "width": 300, "height": 196},
-                                     {"id": "n", "type": "text", "text": "N", "x": 0, "y": 0, "width": 260, "height": 120}]})
+                                     {"id": "n", "type": "text", "text": "N", "x": 0, "y": 0, "width": 260, "height": 120}],
+                           "edges": [{"id": "e", "fromNode": "n", "toNode": "g"}]})
     app.call("rename_graph", slug="plan", version=1, title="Moved on")
     before = app.edge.canvas("plan")
     with pytest.raises(ToolError, match="Nothing was saved: 'plan' has changed since version 1 and is now at version 2"):

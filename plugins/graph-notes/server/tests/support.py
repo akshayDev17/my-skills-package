@@ -177,6 +177,7 @@ class App:
         if signed_in:
             self.edge.sessions.add(self.session_value)
         self._store = tempfile.TemporaryDirectory()
+        self.downloads = tempfile.TemporaryDirectory()  # where download_for_obsidian saves
         store = Path(self._store.name)
         self.cloudflared = FakeCloudflared(self.edge, store, self.session_value if signed_in else None)
         self.api = Api(APP_URL, Session(APP_URL, run=self.cloudflared, store=store), send=self.edge.send)
@@ -241,4 +242,11 @@ def tour(app: App) -> list:
     do("trash_graph", slug="tour-copy")
     do("trash_graph", slug="tour-copy")
     do("add_notes", slug="tour", version="not a number", notes=[])
+    # how notes and links look, and links changed in place (on the restored version 3)
+    do("style_notes", slug="tour", version=15, notes=[{"id": two, "color": "green", "shape": "pill"}])
+    do("update_links", slug="tour", version=16, links=[{"id": added["links_added"][0]["id"], "label": "on to", "direction": "backward",
+                                                        "line": "dotted", "from_side": "bottom", "to_side": "top"}])
+    do("style_notes", slug="tour", version=17, notes=[{"id": two, "color": "blue"}])
+    do("download_for_obsidian", folder=app.downloads.name)
+    do("download_for_obsidian", folder=f"{app.downloads.name}/no-such-folder")
     return results

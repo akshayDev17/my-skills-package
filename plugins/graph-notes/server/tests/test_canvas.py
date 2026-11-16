@@ -55,14 +55,17 @@ def test_cluster_names_are_normalized_and_made_safe_for_a_tag():
     assert canvas.join_tags("note", []) == "note"
 
 
-def test_the_plain_form_has_notes_links_and_clusters_and_no_geometry():
+def test_the_plain_form_has_notes_links_clusters_and_looks_and_no_geometry():
     plain = canvas.plain(fixture("example"))
-    assert plain["notes"][0] == {"id": "api", "text": "## Read API\nServes `/graph/api/*` from D1.", "clusters": ["auth", "backend"]}
-    assert {"id": "e4", "from_note": "access", "to_note": "api", "direction": "both", "label": "guards"} in plain["links"]
+    assert plain["notes"][0] == {"id": "api", "text": "## Read API\nServes `/graph/api/*` from D1.", "clusters": ["auth", "backend"],
+                                 "color": "green"}
+    assert {"id": "e4", "from_note": "access", "to_note": "api", "direction": "both", "label": "guards", "line": "dotted",
+            "from_side": "right", "to_side": "left"} in plain["links"]
     assert {"name": "backend", "made_by": "group box", "members": ["api", "ingest", "d1"]} in plain["clusters"]
-    assert plain["group_boxes"][0] == {"id": "grp-backend", "label": "Backend", "cluster": "backend", "contains": ["api", "ingest", "d1"], "collapsed": False}
+    assert plain["group_boxes"][0] == {"id": "grp-backend", "label": "Backend", "cluster": "backend", "contains": ["api", "ingest", "d1"],
+                                       "collapsed": False, "color": "cyan"}
     text = repr(plain)
-    assert not any(key in text for key in ("'x'", "'width'", "fromSide", "styleAttributes", "color"))
+    assert not any(key in text for key in ("'x'", "'width'", "fromSide", "styleAttributes", "pathfindingMethod", "textAlign"))
 
 
 def test_a_tag_and_a_group_box_of_the_same_name_are_one_cluster():

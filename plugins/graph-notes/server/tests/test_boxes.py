@@ -196,7 +196,7 @@ def test_renaming_a_box_changes_its_label_and_cluster_and_nothing_else():
     doc = {"nodes": [g, card("a", 0, 0)]}
     after, updated, moved, _ = canvas.update_group_boxes(doc, [{"id": "g", "label": "New name"}])
     assert by_id(after, "g") == {**g, "label": "New name"} and list(by_id(after, "g")) == list(g)
-    assert updated == [{"id": "g", "label": "New name", "cluster": "new-name", "contains": ["a"], "collapsed": False}]
+    assert updated == [{"id": "g", "label": "New name", "cluster": "new-name", "contains": ["a"], "collapsed": False, "color": "green"}]
     assert moved == [] and by_id(after, "a") is doc["nodes"][1]
 
 
@@ -233,10 +233,11 @@ def test_removing_a_box_keeps_its_notes_exactly_where_they_are():
 
 @pytest.mark.parametrize("edit, message", [
     (lambda d: canvas.add_group_boxes(d, [{"label": " ", "notes": ["a"]}]), "needs a label"),
-    (lambda d: canvas.add_group_boxes(d, [{"label": "X", "notes": []}]), "at least one note"),
     (lambda d: canvas.add_group_boxes(d, [{"label": "X", "notes": ["nope"]}]), "'nope' names no note"),
-    (lambda d: canvas.add_group_boxes(d, [{"label": "X", "notes": ["g"]}]), "is a group box"),
-    (lambda d: canvas.add_group_boxes(d, [{"label": "X", "notes": ["a"]}, {"label": "Y", "notes": ["a"]}]), "two boxes"),
+    (lambda d: canvas.update_group_boxes(d, [{"id": "g", "notes": ["g"]}]), "cannot hold itself"),
+    (lambda d: canvas.update_group_boxes({"nodes": d["nodes"] + [box("in", 520, 60, 100, 100, "In")]}, [{"id": "in", "notes": ["g"]}]),
+     "'g' holds group box 'in'"),
+    (lambda d: canvas.add_group_boxes(d, [{"label": "X", "notes": ["a"]}, {"label": "Y", "notes": ["a", "g"]}]), "two boxes"),
     (lambda d: canvas.update_group_boxes(d, [{"id": "a", "label": "X"}]), "is not a group box"),
     (lambda d: canvas.update_group_boxes(d, [{"id": "g", "label": ""}]), "needs a label"),
     (lambda d: canvas.update_group_boxes(d, [{"id": "g", "notes": []}]), "remove_group_boxes"),

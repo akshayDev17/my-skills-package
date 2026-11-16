@@ -37,3 +37,9 @@ def test_a_tool_the_guard_does_not_know_is_refused_unless_it_names_a_test_graph(
         guarded("some_future_tool", {})
     with pytest.raises(NotATestGraph):
         guarded("list_graphs", {"slug": "example"})
+
+
+def test_the_obsidian_download_is_refused_whatever_it_is_given():
+    for arguments in ({}, {"folder": "/tmp"}, {"slug": "mcp-test-1"}):
+        with pytest.raises(NotATestGraph, match="download_for_obsidian refused"):
+            guarded("download_for_obsidian", arguments)

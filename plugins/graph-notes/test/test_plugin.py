@@ -131,8 +131,8 @@ def test_the_plugin_command_serves_the_graph_tools(app, tmp_path):
     assert tools == {
         "about_graphs", "list_graphs", "read_graph", "list_history", "list_trash", "create_graph", "copy_graph",
         "rename_graph", "set_visibility", "restore_version", "trash_graph", "restore_from_trash", "add_notes",
-        "update_notes", "remove_notes", "link_notes", "unlink_notes", "add_group_boxes", "update_group_boxes",
-        "remove_group_boxes"}
+        "update_notes", "remove_notes", "link_notes", "unlink_notes", "update_links", "style_notes", "move_notes",
+        "add_group_boxes", "update_group_boxes", "remove_group_boxes", "download_for_obsidian"}
     assert "what a graph is" in guide
     assert [g["slug"] for g in listed["mine"]] == ["plan"] and listed["public_from_others"] == []
     assert graph["version"] == 3

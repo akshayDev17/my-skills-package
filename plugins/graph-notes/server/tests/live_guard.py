@@ -19,8 +19,12 @@ class NotATestGraph(AssertionError):
 def guarded(tool: str, arguments: dict) -> dict:
     """``arguments``, or ``NotATestGraph`` unless every graph the call names is a test graph.
 
-    A tool that derives a slug when none is given (create, copy) must be given one.
+    A tool that derives a slug when none is given (create, copy) must be given one. The
+    Obsidian download holds every graph of the account, so the live run never makes one.
     """
+    if tool == "download_for_obsidian":
+        raise NotATestGraph(f"the live test may only touch '{PREFIX}*' graphs, and the Obsidian download holds every "
+                            "graph of the account: download_for_obsidian refused")
     if tool in NO_GRAPH_NAMED and not arguments:
         return arguments
     for name in NAMES.get(tool, ("slug",)):

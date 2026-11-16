@@ -151,6 +151,47 @@ async def live_run(report) -> None:
             assert [n["id"] for n in graph["notes"]] == [first, second, third]
             report("update_group_boxes, remove_group_boxes: renamed and refitted, opened, removed with its note kept")
 
+            styled = await ok("style_notes", slug=slug, version=13, notes=[
+                {"id": first, "color": "purple", "border": "dashed", "shape": "pill", "text_align": "center"},
+                {"id": start["id"], "color": "#30a46c"}])
+            assert styled["version"] == 14 and styled["styled"][1] == {"id": start["id"], "color": "#30a46c"}
+            linked = await ok("link_notes", slug=slug, version=14, links=[
+                {"from_note": first, "to_note": third, "direction": "backward", "from_side": "bottom", "to_side": "top"}])
+            back = linked["added"][0]["id"]
+            changed = await ok("update_links", slug=slug, version=15, links=[
+                {"id": back, "label": "comes from", "color": "orange", "line": "dotted", "path": "right-angles"}])
+            graph = await ok("read_graph", slug=slug)
+            assert graph["version"] == 16 and next(n for n in graph["notes"] if n["id"] == first) == {
+                "id": first, "text": "## First\nMade by the MCP live test.", "clusters": ["beginning", "live-test"],
+                "color": "purple", "border": "dashed", "shape": "pill", "text_align": "center"}
+            assert next(link for link in graph["links"] if link["id"] == back) == changed["updated"][0] == {
+                "id": back, "from_note": first, "to_note": third, "direction": "backward", "label": "comes from",
+                "color": "orange", "line": "dotted", "path": "right-angles", "from_side": "bottom", "to_side": "top"}
+            report("style_notes, link_notes with sides, update_links: looks and a backward link read back as set")
+
+            nested = await ok("add_group_boxes", slug=slug, version=16, boxes=[{"label": "Everything", "notes": [start["id"], second, third]}])
+            outer = nested["added"][0]
+            assert outer["boxes"] == [start["id"]] and set(outer["contains"]) == {first, second, third}
+            laid = await ok("read_graph", slug=slug, layout=True)
+            box = next(b for b in laid["group_boxes"] if b["id"] == outer["id"])
+            placed = await ok("move_notes", slug=slug, version=17, notes=[
+                {"id": outer["id"], "x": box["x"] + 200, "y": box["y"]}, {"id": third, "width": 280}])
+            assert {p["id"] for p in placed["placed"]} == {outer["id"], start["id"], first, second, third}
+            laid = await ok("read_graph", slug=slug, layout=True)
+            assert next(b for b in laid["group_boxes"] if b["id"] == outer["id"])["x"] == box["x"] + 200
+            assert next(n for n in laid["notes"] if n["id"] == third)["width"] == 280
+            report("add_group_boxes around a box, read_graph with layout, move_notes: a box nests, moves with its contents, a note resizes")
+
+            page = await ok("add_notes", slug=slug, version=18, notes=[{"url": "https://example.com/start", "key": "page"}],
+                            links=[{"from_note": "page", "to_note": first, "label": "explains"}])
+            card = page["added"][0]
+            assert card["kind"] == "web page" and card["url"] == "https://example.com/start"
+            await ok("update_notes", slug=slug, version=19, notes=[{"id": card["id"], "url": "https://example.org/start"}])
+            graph = await ok("read_graph", slug=slug)
+            assert [c for c in graph["other_cards"] if c["id"] == card["id"]] == [
+                {"id": card["id"], "kind": "web page", "url": "https://example.org/start", "clusters": []}]
+            report("add_notes with a url, update_notes url: a web-page card made and its address changed")
+
             trashed = await ok("trash_graph", slug=slug)
             assert trashed["trashed_at"]
             assert slug in [g["slug"] for g in (await ok("list_trash"))["trash"]]

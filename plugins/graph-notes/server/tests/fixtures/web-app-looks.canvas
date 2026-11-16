@@ -1,0 +1,88 @@
+{
+  "nodes": [
+    {
+      "id": "a1",
+      "type": "text",
+      "text": "Alpha",
+      "x": 0,
+      "y": 0,
+      "width": 260,
+      "height": 120,
+      "color": "4",
+      "styleAttributes": {
+        "border": "dashed",
+        "shape": "pill",
+        "textAlign": "center"
+      }
+    },
+    {
+      "id": "b2",
+      "type": "text",
+      "text": "Beta",
+      "x": 420,
+      "y": 0,
+      "width": 260,
+      "height": 120,
+      "styleAttributes": {
+        "border": "invisible",
+        "shape": "database",
+        "textAlign": "right"
+      },
+      "color": "#ab12cd"
+    },
+    {
+      "id": "c3",
+      "type": "text",
+      "text": "Gamma",
+      "x": 0,
+      "y": 300,
+      "width": 260,
+      "height": 120,
+      "color": "1",
+      "styleAttributes": {
+        "border": "dotted",
+        "shape": "circle"
+      }
+    },
+    {
+      "id": "d4",
+      "type": "text",
+      "text": "Delta",
+      "x": 420,
+      "y": 300,
+      "width": 260,
+      "height": 120,
+      "color": "3"
+    }
+  ],
+  "edges": [
+    {
+      "id": "8a2d05de9e881b38",
+      "fromNode": "a1",
+      "fromSide": "right",
+      "toNode": "b2",
+      "toSide": "left",
+      "label": "feeds",
+      "color": "2",
+      "styleAttributes": {
+        "path": "dotted",
+        "pathfindingMethod": "square"
+      },
+      "toEnd": "none",
+      "fromEnd": "arrow"
+    },
+    {
+      "id": "5ecbb36f547512c4",
+      "fromNode": "c3",
+      "fromSide": "top",
+      "toNode": "a1",
+      "toSide": "bottom",
+      "fromEnd": "arrow",
+      "styleAttributes": {
+        "path": "long-dashed",
+        "pathfindingMethod": "direct"
+      },
+      "color": "#30a46c"
+    }
+  ]
+}

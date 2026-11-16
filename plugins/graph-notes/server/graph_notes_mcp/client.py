@@ -40,6 +40,7 @@ ROUTES = tuple((method, re.compile(pattern)) for method, pattern in (
     ("PUT", rf"/graphs/{_S}"),
     ("DELETE", rf"/graphs/{_S}"),  # to the trash; nothing else is ever deleted
     ("POST", rf"/graphs/{_S}/(undelete|restore|visibility)"),
+    ("GET", r"/export"),  # the Obsidian download: a zip of every live graph of the person's
 ))
 
 
@@ -106,9 +107,9 @@ def signed_out(response: Response) -> bool:
     return 300 <= response.status < 400 or response.status == 401
 
 
-def call(api: Api, method: str, path: str, body: dict | None = None) -> dict:
-    """The JSON the app answers ``method path`` with. Raises ``ApiError`` for anything
-    but success, ``SignInError`` when no session can be had."""
+def send(api: Api, method: str, path: str, body: dict | None = None) -> Response:
+    """The app's answer to ``method path``, signed in (once more when the session has
+    lapsed). Raises ``ApiError`` for a request outside ``ROUTES`` or a refused sign-in."""
     if not any(m == method and pattern.fullmatch(path) for m, pattern in ROUTES):
         raise ApiError(0, f"{method} {path} is not something this server does")
     data = json.dumps(body if body is not None else {}).encode() if method in ("POST", "PUT") else None
@@ -122,6 +123,13 @@ def call(api: Api, method: str, path: str, body: dict | None = None) -> dict:
             raise ApiError(response.status, (
                 "the app refused a fresh sign-in as well. Try again to sign in once more; if it keeps "
                 f"refusing, open {api.app_url} in a browser to check that this account may use it."))
+    return response
+
+
+def call(api: Api, method: str, path: str, body: dict | None = None) -> dict:
+    """The JSON the app answers ``method path`` with. Raises ``ApiError`` for anything
+    but success, ``SignInError`` when no session can be had."""
+    response = send(api, method, path, body)
     try:
         answer = json.loads(response.body)
     except ValueError:
@@ -186,3 +194,15 @@ def restore_version(api: Api, slug: str, base: int, version: int) -> dict:
 
 def set_visibility(api: Api, slug: str, base: int, visibility: str) -> dict:
     return call(api, "POST", f"/graphs/{checked_slug(slug)}/visibility", {"base": base, "visibility": visibility})
+
+
+def export_zip(api: Api) -> bytes:
+    """The web app's "Download for Obsidian": a zip of every live graph of the person's."""
+    response = send(api, "GET", "/export")
+    if response.status == 200 and response.body[:4] == b"PK\x03\x04":
+        return response.body
+    try:
+        message = json.loads(response.body).get("error")
+    except (ValueError, AttributeError):
+        message = None
+    raise ApiError(response.status, message or f"the app answered HTTP {response.status} with something that is not a zip")

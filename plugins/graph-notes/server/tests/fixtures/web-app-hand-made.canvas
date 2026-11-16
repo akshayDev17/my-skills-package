@@ -1,0 +1,116 @@
+{
+  "nodes": [
+    {
+      "id": "a1",
+      "type": "text",
+      "text": "Alpha",
+      "x": 0,
+      "y": 0,
+      "width": 260,
+      "height": 120,
+      "color": "4",
+      "styleAttributes": {
+        "border": "dashed",
+        "shape": "pill",
+        "textAlign": "center"
+      }
+    },
+    {
+      "id": "b2",
+      "type": "text",
+      "text": "Beta",
+      "x": 420,
+      "y": 0,
+      "width": 260,
+      "height": 120,
+      "styleAttributes": {
+        "border": "invisible",
+        "shape": "database",
+        "textAlign": "right"
+      },
+      "color": "#ab12cd"
+    },
+    {
+      "id": "c3",
+      "type": "text",
+      "text": "Gamma",
+      "x": 0,
+      "y": 300,
+      "width": 260,
+      "height": 120,
+      "color": "1",
+      "styleAttributes": {
+        "border": "dotted",
+        "shape": "circle"
+      }
+    },
+    {
+      "id": "d4",
+      "type": "text",
+      "text": "Delta",
+      "x": 84,
+      "y": -772,
+      "width": 360,
+      "height": 180,
+      "color": "3"
+    },
+    {
+      "type": "group",
+      "label": "Pair",
+      "width": 879,
+      "height": 620,
+      "id": "65bce837b6b572f3",
+      "x": 12,
+      "y": -869,
+      "color": "5"
+    },
+    {
+      "type": "link",
+      "url": "https://example.com/page",
+      "width": 400,
+      "height": 240,
+      "id": "f6cd9bff38f71a15",
+      "x": 140,
+      "y": -345
+    },
+    {
+      "type": "group",
+      "label": "Inner",
+      "width": 279,
+      "height": 200,
+      "id": "ddf96c0ff76bbbc1",
+      "x": 520,
+      "y": -745
+    }
+  ],
+  "edges": [
+    {
+      "id": "8a2d05de9e881b38",
+      "fromNode": "a1",
+      "fromSide": "right",
+      "toNode": "b2",
+      "toSide": "left",
+      "label": "feeds",
+      "color": "2",
+      "styleAttributes": {
+        "path": "dotted",
+        "pathfindingMethod": "square"
+      },
+      "toEnd": "none",
+      "fromEnd": "arrow"
+    },
+    {
+      "id": "5ecbb36f547512c4",
+      "fromNode": "c3",
+      "fromSide": "top",
+      "toNode": "a1",
+      "toSide": "bottom",
+      "fromEnd": "arrow",
+      "styleAttributes": {
+        "path": "long-dashed",
+        "pathfindingMethod": "direct"
+      },
+      "color": "#30a46c"
+    }
+  ]
+}

@@ -157,13 +157,16 @@ def test_drawing_a_box_appends_it_and_changes_only_the_places_of_the_cards_it_sa
     box, moved = added["added"][0]["id"], added["moved"]
     after = app.edge.canvas(slug)
     assert after["nodes"][-1]["id"] == box and added["added"][0]["contains"] == [one["id"], two["id"]]
-    assert stored(after, box, *moved) == stored(before, *moved)
     was = {n["id"]: n for n in before["nodes"]}
+    # a box the new one is drawn inside may grow to keep room around it: only its geometry changes
+    grown = [n["id"] for n in after["nodes"] if n["type"] == "group" and n["id"] in was and n != was[n["id"]]]
+    assert all(f"group box '{g}' grew" in " ".join(added.get("notices", [])) for g in grown)
+    assert stored(after, box, *moved, *grown) == stored(before, *moved, *grown)
     for n in after["nodes"]:
-        if n["id"] in moved:
+        if n["id"] in moved or n["id"] in grown:
             assert list(n) == list(was[n["id"]])
-            assert store.dumps({k: v for k, v in n.items() if k not in ("x", "y")}) == store.dumps(
-                {k: v for k, v in was[n["id"]].items() if k not in ("x", "y")})
+            assert store.dumps({k: v for k, v in n.items() if k not in ("x", "y", "width", "height")}) == store.dumps(
+                {k: v for k, v in was[n["id"]].items() if k not in ("x", "y", "width", "height")})
 
 
 @pytest.mark.parametrize("slug", ["example", "odd"])  # the canvases with a group box the person drew

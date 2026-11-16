@@ -99,8 +99,9 @@ the boxes in `group_boxes`, each with its `id`, `label`, the notes it `contains`
 starts `collapsed`. All three box tools take a list and save one version per call.
 
 - **Create**: `add_group_boxes` draws boxes, each with a `label` around the `notes` you name
-  (their ids, or other boxes' ids or keys to nest them), optionally `collapsed: true`. Draw boxes after the notes and their links exist,
-  so take the ids from the result of `add_notes` or from `read_graph`.
+  (their ids, or other boxes' ids or keys to nest them), optionally `collapsed: true`. Draw
+  boxes after the notes and their links exist, so take the ids from the result of `add_notes`
+  or from `read_graph`.
 - **Rename**: `update_group_boxes` with `id` and a new `label`. That renames the box's cluster
   too. The box stays where it is and only widens if the new label needs more room.
 - **Refit**: `update_group_boxes` with `id` and `notes`, the full new set it should hold. The

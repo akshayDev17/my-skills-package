@@ -118,7 +118,7 @@ async def live_run(report) -> None:
             report("rename_graph, list_history, read at a version, restore_version: version 3 is back as version 8")
 
             public = await ok("set_visibility", slug=slug, version=8, visibility="public")
-            assert public["visibility"] == "public" and public["public_url"].endswith(f"/public?g={slug}")
+            assert public["visibility"] == "public" and public["public_url"].endswith(f"/graph/?g={slug}")
             private = await ok("set_visibility", slug=slug, version=9, visibility="private")
             assert private["visibility"] == "private" and private["version"] == 10
             report("set_visibility: public, then private again")

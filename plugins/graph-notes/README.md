@@ -80,9 +80,9 @@ the notes in the `reading-list` graph". The tools appear as
 `server/` is a copy of the private graph-notes repo's `mcp-server/` directory, which is where the
 server is developed. The copy is never edited here.
 
-- **Copied from:** graph-notes commit `63cba6cbf5e7b9b1291f9ea7dc06b4a5029fbdbf`
-  (graph-notes PR 25, after which the server signs in at `/graph/signin`, since `/graph` itself
-  is now the public gallery and no longer asks for a sign-in).
+- **Copied from:** graph-notes commit `edb9417838dbf1dc579a08ef772415188c89938b`
+  (graph-notes PR 28, after which the tools report a graph's `public_url` as `/graph/?g=<slug>`,
+  the canonical signed-out address, instead of `/graph/public?g=<slug>`, which only redirects).
 - `SERVER_SOURCE` records that commit and a sha256 for every file in `server/`. CI
   (`scripts/check-path-plugins.mjs`) fails if `server/` differs from it in any way: a file
   changed, added or removed by hand. It also fails if this README names a different commit.

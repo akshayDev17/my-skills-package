@@ -188,7 +188,7 @@ def summary(app_url: str, row: dict) -> dict:
              "saved_at": row["version"]["saved_at"], "visibility": row["visibility"], "mine": row["mine"],
              "url": graph_url(app_url, row["slug"])}
     if row["visibility"] == "public":
-        shown["public_url"] = f"{app_url}/public?g={row['slug']}"
+        shown["public_url"] = f"{app_url}/?g={row['slug']}"
     if row.get("deleted_at"):
         shown["trashed_at"] = row["deleted_at"]
     return shown

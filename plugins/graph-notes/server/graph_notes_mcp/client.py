@@ -122,7 +122,7 @@ def send(api: Api, method: str, path: str, body: dict | None = None) -> Response
         if signed_out(response):
             raise ApiError(response.status, (
                 "the app refused a fresh sign-in as well. Try again to sign in once more; if it keeps "
-                f"refusing, open {api.app_url} in a browser to check that this account may use it."))
+                f"refusing, open {api.session.app_url} in a browser and sign in to check that this account may use it."))
     return response
 
 

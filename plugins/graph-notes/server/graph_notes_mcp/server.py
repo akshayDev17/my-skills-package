@@ -41,6 +41,14 @@ from .session import Session, SignInError
 
 APP_URL = "https://akshayprabhakant.com/graph"
 
+
+def sign_in_url(app_url: str) -> str:
+    """Where ``cloudflared`` finds the app's Access application: its sign-in page, the one page the
+    Access login always guards. ``/graph`` itself shows the public graphs to anyone once the owner
+    lets it open signed out, and then answers with no login for ``cloudflared`` to read the
+    application from (docs/adr/0002-signed-out-graph-is-the-public-gallery.md)."""
+    return f"{app_url}/signin"
+
 READS = ToolAnnotations(readOnlyHint=True)
 ADDS = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
 REPLACES = ToolAnnotations(readOnlyHint=False, destructiveHint=True)
@@ -541,7 +549,7 @@ def main() -> None:
     notices.setFormatter(logging.Formatter("%(message)s"))
     logging.getLogger("graph_notes_mcp").addHandler(notices)
     logging.getLogger("graph_notes_mcp").setLevel(logging.INFO)
-    build_server(Api(app_url, Session(app_url))).run(transport="stdio", show_banner=False)
+    build_server(Api(app_url, Session(sign_in_url(app_url)))).run(transport="stdio", show_banner=False)
 
 
 if __name__ == "__main__":

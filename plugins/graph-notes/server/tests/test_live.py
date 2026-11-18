@@ -6,7 +6,7 @@ Opt-in, never in CI:  GRAPH_NOTES_LIVE=1 uv run pytest tests/test_live.py -s
 It touches only graphs it creates, named ``mcp-test-<time>...`` (``live_guard`` refuses
 any other slug before a call is made), leaves them in the trash, and checks at the end
 that every other graph of the account is exactly as it was. It needs a saved sign-in
-and will not start one: run ``cloudflared access login <app>`` first.
+and will not start one: run ``cloudflared access login <app>/signin`` first.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ import pytest
 from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
 
-from graph_notes_mcp.server import APP_URL
+from graph_notes_mcp.server import APP_URL, sign_in_url
 from live_guard import PREFIX, guarded
 
 pytestmark = pytest.mark.skipif(os.environ.get("GRAPH_NOTES_LIVE") != "1", reason="live run: set GRAPH_NOTES_LIVE=1")
@@ -211,9 +211,9 @@ async def live_run(report) -> None:
 
 
 def test_every_tool_against_the_live_app():
-    saved = subprocess.run(["cloudflared", "access", "token", f"-app={APP_URL}"], stdin=subprocess.DEVNULL,
+    saved = subprocess.run(["cloudflared", "access", "token", f"-app={sign_in_url(APP_URL)}"], stdin=subprocess.DEVNULL,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
     if saved.returncode != 0:
-        pytest.fail(f"no saved sign-in: run `cloudflared access login {APP_URL}` once, then run this again", pytrace=False)
+        pytest.fail(f"no saved sign-in: run `cloudflared access login {sign_in_url(APP_URL)}` once, then run this again", pytrace=False)
     # Printed, not captured through a fixture: the stdio client hands the real stderr to the server (run with -s).
     asyncio.run(live_run(lambda line: print(f"PASS | {line}", flush=True)))

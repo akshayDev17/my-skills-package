@@ -213,7 +213,7 @@ def test_public_and_private(app):
     new_graph(app)
     public = app.call("set_visibility", slug="plan", version=1, visibility="public")
     assert (public["visibility"], public["version"]) == ("public", 2)
-    assert public["public_url"] == "https://graph.test/graph/public?g=plan"
+    assert public["public_url"] == "https://graph.test/graph/?g=plan"
     private = app.call("set_visibility", slug="plan", version=2, visibility="private")
     assert private["visibility"] == "private" and "public_url" not in private
 

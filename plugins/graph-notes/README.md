@@ -62,7 +62,7 @@ five minutes. `cloudflared` keeps the session under `~/.cloudflared` for **24 ho
 server reuses it. After that, the next call opens the browser again. To sign in ahead of time:
 
 ```sh
-cloudflared access login https://akshayprabhakant.com/graph
+cloudflared access login https://akshayprabhakant.com/graph/signin
 ```
 
 The session stays in the server's memory and goes only into the request header. It is never
@@ -80,8 +80,9 @@ the notes in the `reading-list` graph". The tools appear as
 `server/` is a copy of the private graph-notes repo's `mcp-server/` directory, which is where the
 server is developed. The copy is never edited here.
 
-- **Copied from:** graph-notes commit `17ae05f2f23dbaafb77fc78addd1e347bccd1065`
-  (graph-notes PRs 21-24, which brought the server to parity with the web app's editor).
+- **Copied from:** graph-notes commit `63cba6cbf5e7b9b1291f9ea7dc06b4a5029fbdbf`
+  (graph-notes PR 25, after which the server signs in at `/graph/signin`, since `/graph` itself
+  is now the public gallery and no longer asks for a sign-in).
 - `SERVER_SOURCE` records that commit and a sha256 for every file in `server/`. CI
   (`scripts/check-path-plugins.mjs`) fails if `server/` differs from it in any way: a file
   changed, added or removed by hand. It also fails if this README names a different commit.

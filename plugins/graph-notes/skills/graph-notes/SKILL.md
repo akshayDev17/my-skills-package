@@ -202,7 +202,7 @@ saves no new version.
 The server signs in through `cloudflared` and Cloudflare Access. If there is no saved sign-in,
 the first tool call opens the person's browser and waits up to five minutes for them to finish.
 A sign-in lasts 24 hours. If a tool answers with a sign-in or install message, pass it on: the
-person finishes signing in in the browser, or runs `cloudflared access login <app url>` in a
-terminal, or installs `cloudflared`. Then try once more. Do not retry in a loop. If the app still
+person finishes signing in in the browser, or runs the `cloudflared access login` command the
+message names in a terminal, or installs `cloudflared`. Then try once more. Do not retry in a loop. If the app still
 refuses a fresh sign-in, the account is not allowed in by the site's sign-in policy, and no
 tool call can change that.

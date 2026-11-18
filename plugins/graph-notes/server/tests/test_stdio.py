@@ -163,7 +163,7 @@ def test_stdout_is_protocol_only_while_cloudflared_signs_in_and_the_session_is_s
     stderr = stdio.close()
     assert stdio.process.returncode == 0
 
-    app = f"{edge.origin}/graph"
+    app = f"{edge.origin}/graph/signin"  # where cloudflared finds the Access application
     assert (tmp_path / "calls").read_text().splitlines() == [
         f"access token -app={app}", f"access login {app}", f"access token -app={app}",   # no session: sign in
         f"access token -app={app}", f"access login {app}", f"access token -app={app}",   # refused: sign in once more

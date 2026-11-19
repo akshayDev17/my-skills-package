@@ -1,6 +1,6 @@
 {
   "name": "graph-notes",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Read and edit your graph-notes graphs (knowledge graphs kept as Obsidian canvases) as notes and links, through a bundled local MCP server that signs in with cloudflared.",
   "author": { "name": "Akshay Prabhakant" },
   "license": "MIT",

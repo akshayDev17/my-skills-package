@@ -9,7 +9,9 @@ links and clusters, kept as an Obsidian canvas. The plugin bundles two things:
   graphs; add, change, remove, link and unlink notes; make web-page cards and edit web-page and
   file cards; change links in place; set colours, card borders, shapes and text alignment, and
   link line styles, paths and sides; move and resize notes and boxes; draw, nest, rename, refit,
-  collapse and remove group boxes; browse history and undo or redo by restoring a version; make
+  collapse and remove group boxes; list a graph's image library and attach a picture from a
+  file on this computer to a note (`list_images`, `attach_image`; no tool deletes a picture or
+  downloads one from the web); browse history and undo or redo by restoring a version; make
   a graph public or private; download every graph for Obsidian; and move graphs to the trash and
   back. Every edit the web app's editor can make has a tool. No tool deletes a graph forever.
   The model works with notes, links and boxes, and the server places new cards on the canvas
@@ -19,7 +21,7 @@ links and clusters, kept as an Obsidian canvas. The plugin bundles two things:
 - **A skill** (`skills/graph-notes/SKILL.md`) that teaches the model what a graph is (an
   Obsidian canvas: cards, edges, tag clusters, group boxes) and how to edit one well through
   those tools: how to group a graph's parts in titled, collapsible, nestable boxes, style and
-  move things, and undo a change.
+  move things, put pictures in notes, and undo a change.
 
 The server's code is bundled in the plugin, so you need no access to the graph-notes repo and
 no clone. Works in Claude Code only.
@@ -80,9 +82,13 @@ the notes in the `reading-list` graph". The tools appear as
 `server/` is a copy of the private graph-notes repo's `mcp-server/` directory, which is where the
 server is developed. The copy is never edited here.
 
-- **Copied from:** graph-notes commit `edb9417838dbf1dc579a08ef772415188c89938b`
-  (graph-notes PR 28, after which the tools report a graph's `public_url` as `/graph/?g=<slug>`,
-  the canonical signed-out address, instead of `/graph/public?g=<slug>`, which only redirects).
+- **Copied from:** graph-notes commit `bd8e83ec988ea7df984b76e81cc88fd84e48e849`
+  (graph-notes PR 39, which added the picture tools `list_images` and `attach_image`, copies
+  other graphs' pictures in through `add_notes`, `update_notes` and `copy_graph`, and puts each
+  graph's pictures in the Obsidian download at `attachments/<slug>/`; and PR 42, after which
+  location and other metadata are removed from every part of an uploaded picture; and PR 44,
+  after which a picture path inside a web URL is left alone, and a picture is copied in only
+  once the edit that names it is known to be valid).
 - `SERVER_SOURCE` records that commit and a sha256 for every file in `server/`. CI
   (`scripts/check-path-plugins.mjs`) fails if `server/` differs from it in any way: a file
   changed, added or removed by hand. It also fails if this README names a different commit.
@@ -93,7 +99,9 @@ To refresh the copy after a change to the server in graph-notes:
 2. From this repo, run `scripts/refresh-graph-notes-server.sh <graph-notes checkout> [<commit>]`
    (the default commit is `HEAD`). It takes `mcp-server/` exactly as committed at that commit,
    runs graph-notes' own test suite against that copy (in a temporary directory, next to the
-   same commit's `backend/`, which the offline tests run against), replaces `server/` and
+   same commit's `backend/`, which the offline tests run against, and its `frontend/lib/`, the
+   web app's TypeScript that the picture tests check the server against with node 22.6+),
+   replaces `server/` and
    rewrites `SERVER_SOURCE`. It writes nothing into the graph-notes checkout.
 3. Put the new commit in the "Copied from" line above, bump `version` in
    `.claude-plugin/plugin.json` (installed copies update only when it changes), update the

@@ -11,7 +11,8 @@
 #
 # Before copying, it runs graph-notes' own test suite against that exact copy, in a
 # temporary directory that also holds the same commit's backend/ (the offline tests run
-# the real API over SQLite). Nothing is written into the checkout.
+# the real API over SQLite) and frontend/lib/ (the picture tests check the server against
+# the web app's own TypeScript, with node 22.6+). Nothing is written into the checkout.
 set -euo pipefail
 
 checkout=${1:?usage: $0 <graph-notes checkout> [<commit>]}
@@ -25,7 +26,7 @@ git -C "$checkout" cat-file -e "$commit:mcp-server/pyproject.toml" 2>/dev/null \
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-git -C "$checkout" archive "$commit" mcp-server backend | tar -x -C "$work"
+git -C "$checkout" archive "$commit" mcp-server backend frontend/lib | tar -x -C "$work"
 
 echo "== graph-notes $commit: running mcp-server's tests against the copy"
 (cd "$work/mcp-server" && uv run --frozen --quiet pytest -q -p no:cacheprovider)

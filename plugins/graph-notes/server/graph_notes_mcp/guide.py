@@ -66,6 +66,34 @@ refitting a group box, which moves notes only where the box needs it, and says w
   clusters of its own (a group box around one puts it in a cluster). File cards cannot be
   made here, as in the web app: they come from Obsidian.
 
+## Pictures and the image library
+
+Each graph has an **image library**: the pictures uploaded into it, kept in the app's
+private storage. A note shows one with a Markdown line in its text,
+`![whiteboard.jpg](attachments/<graph slug>/<file>)`, and you see that line in the note's
+`text` like any other. The path names the graph whose library holds the picture, and a
+note shows only its own graph's pictures.
+
+- `list_images` lists a graph's library: each picture's `path`, name, type, size, and the
+  `notes` that show it (an empty list: in the library, on no note).
+- `attach_image` takes a picture **file on this computer** (a screenshot, a downloaded
+  file: PNG, JPEG, WebP or GIF) into the graph's library and puts its line under a note's
+  first line, in one saved version. A note with no text takes the picture's shape.
+  Location and other metadata are removed from the file first, without changing a pixel.
+  Attach only a file the person named or asked for.
+- A picture on the web stays a web image: write `![name](https://...)` into a note's text.
+  Nothing here downloads from a web address.
+- To show a picture of the library in another note, or again, write its line into that
+  note's text (`update_notes`, `add_notes`). A line naming **another graph's** picture is
+  copied into this graph's library first and rewritten to this graph's path, as a paste
+  does in the web app; one that cannot be copied (deleted, or someone else's that is no
+  longer public) is left out, and the result says so. `copy_graph` copies the pictures
+  too: from one of the person's own graphs its whole library, from someone else's public
+  graph the pictures its notes show.
+- Taking a picture's line out of a note, or removing the note, leaves the picture in the
+  library. **No tool here deletes a picture**: Delete image is for the person, in the web
+  app's ⋯ → Images.
+
 ## Moving and resizing by hand
 
 The server places what it adds, and you rarely need more. When the person asks for a
@@ -139,10 +167,12 @@ title only: a change of who can see the graph is undone with `set_visibility`, n
 ## Downloading for Obsidian
 
 `download_for_obsidian` does what the web app's ⋯ → Download for Obsidian does: it saves a
-zip of every one of the person's graphs (not the trash), each as an Obsidian canvas, here
-on this computer (the Downloads folder, or the `folder` you name; it never overwrites a
-file), and says where. Unzip it, then in Obsidian: Open folder as vault. Edits made there
-are not sent back. Only do this when the person asks.
+zip of every one of the person's graphs (not the trash), each as an Obsidian canvas. To
+that zip it adds each graph's whole image library at `attachments/<slug>/`, where the
+notes' picture lines find it from the vault's root. It saves the zip here on this
+computer (the Downloads folder, or the `folder` you name; it never overwrites a file) and
+says where, with how many pictures it holds. Unzip it, then in Obsidian: Open folder as
+vault. Edits made there are not sent back. Only do this when the person asks.
 
 ## Private and public
 

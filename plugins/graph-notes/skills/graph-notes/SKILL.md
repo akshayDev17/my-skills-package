@@ -1,6 +1,6 @@
 ---
 name: graph-notes
-description: Use when the person asks to look at, create, add to, reorganise, restyle or fix one of their graph-notes graphs (knowledge graphs drawn as Obsidian canvases in the graph-notes app), to box or group parts of one, to colour, move or resize its cards, to undo a change, or to turn notes, a document or a conversation into a graph, through the graph-notes MCP tools (list_graphs, read_graph, add_notes, add_group_boxes and the rest).
+description: Use when the person asks to look at, create, add to, reorganise, restyle or fix one of their graph-notes graphs (knowledge graphs drawn as Obsidian canvases in the graph-notes app), to box or group parts of one, to colour, move or resize its cards, to put a picture in a note, to undo a change, or to turn notes, a document or a conversation into a graph, through the graph-notes MCP tools (list_graphs, read_graph, add_notes, add_group_boxes and the rest).
 ---
 
 # graph-notes: reading and editing graphs well
@@ -67,6 +67,28 @@ when there is room.
   and resize a box, send two entries: the move, then the resize. A card moved into or out of a
   box joins or leaves its cluster, and the result says so. To put notes in a box, use the
   group-box tools instead: they place everything for you.
+
+## Pictures
+
+Each graph has an **image library**, and a note shows one of its pictures with a Markdown line
+in its `text`: `![whiteboard.png](attachments/<slug>/<file>)`. The path names the graph whose
+library holds the picture.
+
+- **List**: `list_images` gives a graph's library (the person's own graphs only): each
+  picture's `path`, name, type, size, and the `notes` that show it (none: in the library only).
+- **Attach**: `attach_image` takes a picture **from a file on this computer** (PNG, JPEG, WebP
+  or GIF), adds it to the library and puts its line under the note's first line, in one
+  version. An empty note takes the picture's shape. Location and other metadata are stripped
+  from the file first without changing a pixel. Attach only a file the person named or asked
+  for.
+- **Web pictures** stay web links: write `![name](https://...)` into the note's text. No tool
+  downloads from a web address.
+- **Show one again, or copy one in**: write its line into a note's text with `add_notes` or
+  `update_notes`. A line naming **another graph's** picture is copied into this graph's library
+  and rewritten to its path; one that cannot be copied is left out, and the result says so.
+  `copy_graph` copies the pictures too.
+- **Removing** a picture's line, or its note, leaves the picture in the library. No tool
+  deletes a picture: that is for the person, in the web app.
 
 The server's own `about_graphs` tool returns its guide to this model. Call it if anything
 here seems to disagree with what the tools do; the server is the authority.
@@ -192,7 +214,8 @@ saves no new version.
   tool deletes a graph forever; that is for the person to do, in the web app.
 - **The Obsidian download.** `download_for_obsidian` saves the same zip as the web app's
   ⋯ → Download for Obsidian (every graph, not the trash) to a new file on this computer
-  (Downloads, or the `folder` named; it never overwrites a file) and returns its `path`. Only
+  (Downloads, or the `folder` named; it never overwrites a file), with each graph's pictures at
+  `attachments/<slug>/`, and returns its `path`. Only
   when the person asks; tell them to unzip it and use Obsidian's "Open folder as vault".
 - **Other people's graphs** cannot be changed. `copy_graph` makes a private copy the person
   owns, with the same notes, links and layout but no history.

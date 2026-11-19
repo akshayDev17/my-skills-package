@@ -34,9 +34,14 @@ def test_every_request_names_its_client_and_carries_the_session(toured):
 def test_every_write_carries_the_origin_and_the_write_header_and_json(toured):
     writes = [r for r in toured.edge.requests if r[0] != "GET"]
     assert {method for method, *_ in writes} == {"POST", "PUT", "DELETE"}
+    uploads = [r for r in writes if r[0] == "POST" and r[1].endswith("/images")]
+    assert uploads
     for method, url, headers, body in writes:
         assert headers["origin"] == ORIGIN and headers["x-graph-notes"] == "1", (method, url)
-        if method in ("POST", "PUT"):
+        if (method, url, headers, body) in uploads:  # the file itself, with its type, length and hash
+            assert headers["content-type"] == "image/png" and body.startswith(b"\x89PNG"), url
+            assert headers["content-length"] == str(len(body)) and len(headers["x-content-sha256"]) == 64
+        elif method in ("POST", "PUT"):
             assert headers["content-type"] == "application/json", (method, url)
             assert isinstance(json.loads(body), dict), (method, url)  # a JSON body, even an empty one
     bodiless = [json.loads(body) for method, url, _, body in writes if url.endswith("/undelete")]

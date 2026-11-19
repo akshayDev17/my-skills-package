@@ -8,14 +8,20 @@ import base64
 import json
 import os
 import shutil
+import struct
 import subprocess
 
 import pytest
 
 from graph_notes_mcp import images
-from pictures import (APP2_MPF, APP11_C2PA, C2PA, GIF_FRAME, GIF_LOOP, GPS, HEIC, MP4_WITH_LOCATION, ORIENTATION, SCAN, SCANS, SVG,
-                      XMP_GPS, XMP_MOTION_PHOTO, gif, gif_sub_blocks, jpeg, png, png_chunk, segment, tiff, webp, webp_chunk)
+from pictures import (ADOBE_GAIN_MAP_XMP, APP2_MPF, APP11_C2PA, APPLE_DISPARITY_XMP, APPLE_GAIN_MAP_XMP, APPLE_HEADROOM, C2PA,
+                      EXTENDED_XMP, GIF_FRAME, GIF_LOOP, GPS, HEIC, ISO_PARAMETERS, ISO_VERSION, MP4_WITH_LOCATION, ORIENTATION,
+                      SCAN, SCANS, SVG, ULTRA_HDR_GAIN_MAP_XMP, ULTRA_HDR_PRIMARY_XMP, XMP_GPS, XMP_MOTION_PHOTO, apple_exif, gif,
+                      gif_sub_blocks, ifd, jpeg, mpf_entries, multi_picture, png, png_chunk, segment, split_pictures, tiff, webp,
+                      webp_chunk, xmp_segment)
 from support import REPO
+
+FIXTURES = REPO / "mcp-server/tests/fixtures"
 
 A = "img_7f3a91c0e1b2d4f5.jpg"
 B = "img_0123456789abcdef.png"
@@ -166,6 +172,153 @@ def test_a_clean_file_comes_back_the_same():
         assert images.strip_metadata(data, kind) == data
 
 
+# ── HDR gain maps ──────────────────────────────────────────────────────────
+
+JFIF_SEGMENT = segment(0xE0, b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00")
+ICC_SEGMENT = segment(0xE2, b"ICC_PROFILE\x00\x01\x01profile")
+
+
+def ultra_hdr(little: bool = False, primary_xmp: bytes = ULTRA_HDR_PRIMARY_XMP, gain_map_xmp: bytes = ULTRA_HDR_GAIN_MAP_XMP,
+              iso: bool = True) -> tuple[bytes, bytes]:
+    """``(photo, its gain map)``: a Pixel's Ultra HDR photo with location in every picture. The primary has
+    an Exif with GPS and the orientation, JFIF, a colour profile, XMP (the gain map's version, the container
+    directory, location), extended XMP, ISO 21496-1's version and C2PA; the gain map an Exif with GPS, XMP
+    (its fields, location), ISO 21496-1's parameters, C2PA and a comment; then a thumbnail with GPS, and a
+    motion photo's video."""
+    gain_map = jpeg(160, 120, exif=tiff((GPS, 1)), xmp=gain_map_xmp, comment=b"51.5073N 0.1277W",
+                    extra=(ISO_PARAMETERS if iso else b"") + APP11_C2PA)
+    head = (segment(0xE1, b"Exif\x00\x00" + tiff((ORIENTATION, 6), (GPS, 1))) + JFIF_SEGMENT + ICC_SEGMENT
+            + xmp_segment(primary_xmp) + EXTENDED_XMP + (ISO_VERSION if iso else b"") + APP11_C2PA)
+    return multi_picture(head, [gain_map, jpeg(64, 48, exif=tiff((GPS, 1)))], trailer=MP4_WITH_LOCATION, little=little), gain_map
+
+
+def iphone(headroom: tuple[bytes, bytes] | None = APPLE_HEADROOM, gain_map_xmp: bytes = APPLE_GAIN_MAP_XMP) -> tuple[bytes, bytes]:
+    """``(photo, its gain map)``: an iPhone's photo with Apple's gain map. The primary has JFIF, an Exif (the
+    orientation, GPS, a maker note with a photo identifier and the HDR headroom) and a colour profile; the
+    gain map Apple's XMP (with location), an empty multi-picture index and Apple's rotation segment; then
+    a depth map."""
+    gain_map = jpeg(160, 120, xmp=gain_map_xmp, extra=segment(0xE2, b"MPF\x00MM\x00\x2a\x00\x00\x00\x08\x00\x00\x00\x00\x00\x00")
+                    + segment(0xEA, b"AROT\x00\x00rotation"))
+    head = JFIF_SEGMENT + segment(0xE1, b"Exif\x00\x00" + apple_exif(6, headroom)) + ICC_SEGMENT
+    return multi_picture(head, [gain_map, jpeg(64, 48, xmp=APPLE_DISPARITY_XMP)]), gain_map
+
+
+def signatures(picture: bytes) -> list[bytes]:
+    """The application segments of a picture, before its first scan, each named by its marker and signature."""
+    out, at = [], 2
+    while picture[at + 1] != 0xDA:
+        marker, end = picture[at + 1], at + 2 + struct.unpack(">H", picture[at + 2:at + 4])[0]
+        if 0xE0 <= marker <= 0xEF or marker == 0xFE:
+            out.append(bytes([marker]) + picture[at + 4:end].split(b"\x00")[0])
+        at = end
+    return out
+
+
+XMP_APP = b"\xe1http://ns.adobe.com/xap/1.0/"
+ISO_APP = b"\xe2urn:iso:std:iso:ts:21496:-1"
+
+
+def test_an_ultra_hdr_photo_keeps_its_gain_map_with_only_what_draws_it():
+    original, gain_map = ultra_hdr()
+    out = images.strip_metadata(original, "image/jpeg")
+    pictures, after = split_pictures(out)
+    assert after == b"" and len(pictures) == 2, "the thumbnail and the motion photo's video go"
+    (primary_data, primary), (map_data, kept_map) = pictures
+    assert primary_data == split_pictures(original)[0][0][0], "the primary's image data is untouched"
+    assert map_data == split_pictures(gain_map)[0][0][0], "and the gain map's"
+    base, entries = mpf_entries(primary)
+    assert entries == [(0x030000, len(primary), 0), (0, len(kept_map), len(primary) - base)], "the index lists the two"
+    assert signatures(primary) == [b"\xe0JFIF", b"\xe1Exif", b"\xe2ICC_PROFILE", XMP_APP, ISO_APP, b"\xe2MPF"]
+    assert signatures(kept_map) == [b"\xe0JFIF", XMP_APP, ISO_APP]
+    assert ISO_VERSION in primary and ISO_PARAMETERS in kept_map, "ISO 21496-1 stays as it was"
+    assert b'hdrgm:Version="1.0"' in primary
+    assert f'Item:Semantic="GainMap" Item:Mime="image/jpeg" Item:Length="{len(kept_map)}"'.encode() in primary
+    for field in (b'hdrgm:Version="1.0"', b'hdrgm:GainMapMin="0.000000"', b'hdrgm:GainMapMax="2.656715"',
+                  b'hdrgm:HDRCapacityMax="2.656715"', b'hdrgm:OffsetSDR="0.000000"', b'hdrgm:OffsetHDR="0.000000"'):
+        assert field in kept_map, field
+    for gone in (b"GPS", b"51,30", b"51.5073", b"c2pa", b"HasExtendedXMP", b"MotionPhoto", b"xmp/extension", b"\x88\x25"):
+        assert gone not in out, gone
+    assert images.jpeg_orientation(out) == 6
+    assert images.strip_metadata(out, "image/jpeg") == out, "removing it again changes nothing"
+
+
+def test_an_iphone_photo_keeps_its_gain_map_and_the_headroom_its_maker_note_gives():
+    original, gain_map = iphone()
+    out = images.strip_metadata(original, "image/jpeg")
+    pictures, after = split_pictures(out)
+    assert after == b"" and len(pictures) == 2, "the depth map goes"
+    (primary_data, primary), (map_data, kept_map) = pictures
+    assert primary_data == split_pictures(original)[0][0][0] and map_data == split_pictures(gain_map)[0][0][0]
+    base, entries = mpf_entries(primary)
+    assert entries == [(0x030000, len(primary), 0), (0, len(kept_map), len(primary) - base)]
+    assert signatures(primary) == [b"\xe0JFIF", b"\xe1Exif", b"\xe2ICC_PROFILE", b"\xe2MPF"]
+    assert signatures(kept_map) == [b"\xe0JFIF", XMP_APP]
+    # The Exif: the orientation, and a maker note of the HDR headroom alone.
+    note = b"Apple iOS\x00\x00\x01MM" + ifd([(33, 10, 1, APPLE_HEADROOM[0]), (48, 10, 1, APPLE_HEADROOM[1])], 14)
+    exif = b"MM\x00\x2a\x00\x00\x00\x08" + ifd([(0x0112, 3, 1, b"\x00\x06"), (0x8769, 4, 1, struct.pack(">I", 38))], 8) \
+        + ifd([(0x927C, 7, len(note), note)], 38)
+    assert segment(0xE1, b"Exif\x00\x00" + exif) in primary
+    for field in (b"<apdi:AuxiliaryImageType>urn:com:apple:photo:2020:aux:hdrgainmap</apdi:AuxiliaryImageType>",
+                  b"<apdi:StoredFormat>1278226488</apdi:StoredFormat>", b"<HDRGainMap:HDRGainMapVersion>131072</HDRGainMap:HDRGainMapVersion>",
+                  b"<HDRGainMap:HDRGainMapHeadroom>3.755272</HDRGainMap:HDRGainMapHeadroom>"):
+        assert field in kept_map, field
+    for gone in (b"GPS", b"51,30", b"57DB622E", b"AROT", b"disparity", b"\x88\x25"):
+        assert gone not in out, gone
+    assert images.jpeg_orientation(out) == 6
+    assert images.strip_metadata(out, "image/jpeg") == out
+
+
+def test_a_gain_map_given_per_colour_channel_keeps_its_three_values():
+    original, _ = ultra_hdr(gain_map_xmp=ADOBE_GAIN_MAP_XMP, iso=False)
+    kept_map = split_pictures(images.strip_metadata(original, "image/jpeg"))[0][1][1]
+    assert b'hdrgm:Version="1.0" hdrgm:BaseRenditionIsHDR="False" hdrgm:Gamma="1">' in kept_map
+    assert b"<hdrgm:GainMapMax><rdf:Seq><rdf:li>1.5</rdf:li><rdf:li>2</rdf:li><rdf:li>2.5e0</rdf:li></rdf:Seq></hdrgm:GainMapMax>" in kept_map
+    assert b"Lightroom" not in kept_map and b"51.5073" not in kept_map
+
+
+def test_the_index_is_read_in_either_byte_order():
+    assert images.strip_metadata(ultra_hdr(little=True)[0], "image/jpeg") == images.strip_metadata(ultra_hdr()[0], "image/jpeg")
+
+
+def test_a_picture_both_images_do_not_call_the_gain_map_goes_as_before():
+    """Only the primary stays, as for any multi-picture file, when the primary does not say it has a gain map
+    of that kind, a field is not what its format allows, or a picture is not whole where the index puts it."""
+    original, gain_map = ultra_hdr(iso=False)
+    primary = split_pictures(original)[0][0][1]
+    moved = bytearray(original)
+    struct.pack_into(">I", moved, primary.index(b"MPF\x00") + 4 + 50 + 16 + 8, 7)  # the gain map's offset, wrong
+    cases = {
+        "no gain map version in the primary": ultra_hdr(primary_xmp=XMP_GPS, iso=False)[0],
+        "a field that is not a number": ultra_hdr(gain_map_xmp=ULTRA_HDR_GAIN_MAP_XMP.replace(b'"2.656715"', b'"2.6 at 51.5073N"', 1), iso=False)[0],
+        "no headroom in the maker note": iphone(headroom=None)[0],
+        "not Apple's gain map": iphone(gain_map_xmp=APPLE_DISPARITY_XMP)[0],
+        "the gain map cut short": original[:len(primary) + len(gain_map) // 2],
+        "the index pointing elsewhere": bytes(moved),
+    }
+    for name, data in cases.items():
+        assert images.strip_metadata(data, "image/jpeg") == images.strip_metadata(split_pictures(data)[0][0][1], "image/jpeg"), name
+
+
+@pytest.mark.parametrize("name", ["gainmap-ultrahdr.jpg", "gainmap-iphone.jpg", "gainmap-adobe-iso.jpg"])
+def test_real_hdr_photos_keep_their_gain_map_and_lose_the_rest(name):
+    original = (FIXTURES / name).read_bytes()
+    out = images.strip_metadata(original, "image/jpeg")
+    before, _ = split_pictures(original)
+    pictures, after = split_pictures(out)
+    assert after == b"" and len(pictures) == 2
+    assert [data for data, _ in pictures] == [before[0][0], before[1][0]], "both pictures' image data is untouched"
+    base, entries = mpf_entries(pictures[0][1])
+    assert entries == [(0x030000, len(pictures[0][1]), 0), (0, len(pictures[1][1]), len(pictures[0][1]) - base)]
+    kept = {b"\xe0JFIF", b"\xe1Exif", b"\xe2ICC_PROFILE", b"\xeeAdobe", XMP_APP, ISO_APP, b"\xe2MPF"}
+    assert set(signatures(pictures[0][1])) <= kept and set(signatures(pictures[1][1])) <= kept - {b"\xe1Exif", b"\xe2MPF"}
+    exif = pictures[0][1].find(b"Exif\x00\x00")
+    if exif >= 0:  # its orientation, and the way to an Apple maker note: no GPS IFD
+        tiff_block = pictures[0][1][exif + 6:]
+        assert [struct.unpack(">H", tiff_block[10 + 12 * i:12 + 12 * i])[0] for i in range(struct.unpack(">H", tiff_block[8:10])[0])] \
+            in ([0x0112], [0x8769], [0x0112, 0x8769])
+    assert images.strip_metadata(out, "image/jpeg") == out
+
+
 def _node_strips_types() -> bool:
     node = shutil.which("node")
     if not node:
@@ -184,9 +337,11 @@ def run_web_app(tmp_path, body: str, given: object) -> object:
         pytest.skip("needs node 22.6+ to run the web app's TypeScript")
     script = tmp_path / "check.mjs"
     script.write_text(f"import * as web from {json.dumps((REPO / 'frontend/lib/images.ts').as_uri())};\n"
-                      "const given = JSON.parse(process.argv[2]);\nlet out;\n" + body + "\nconsole.log(JSON.stringify(out));\n")
-    ran = subprocess.run(["node", "--experimental-strip-types", "--no-warnings", str(script), json.dumps(given)],
-                         capture_output=True, text=True, timeout=60)
+                      "import { readFileSync } from 'node:fs';\n"
+                      "const given = JSON.parse(readFileSync(0, 'utf8'));\nlet out;\n" + body + "\nconsole.log(JSON.stringify(out));\n")
+    # On stdin, not argv: Linux caps one argument at 128 KiB, and the sample pictures pass that.
+    ran = subprocess.run(["node", "--experimental-strip-types", "--no-warnings", str(script)],
+                         input=json.dumps(given), capture_output=True, text=True, timeout=60)
     assert ran.returncode == 0, ran.stderr
     return json.loads(ran.stdout)
 
@@ -210,6 +365,16 @@ def test_the_same_bytes_as_the_web_apps_removal(tmp_path):
         "webp-c2pa-trailer": (webp(5, 7, extra=webp_chunk(b"C2PA", C2PA)) + b"tail", "image/webp"),
         "gif-comment-xmp": (gif(blocks=GIF_LOOP + b"\x21\xfe\x02hi\x00" + GIF_FRAME + b"\x21\xff\x0bXMP DataXMP\x03abc\x00") + b"x", "image/gif"),
         "gif-truncated": (gif(blocks=GIF_LOOP + GIF_FRAME)[:-9], "image/gif"),
+        "jpeg-ultra-hdr": (ultra_hdr()[0], "image/jpeg"),
+        "jpeg-ultra-hdr-little-endian-index": (ultra_hdr(little=True)[0], "image/jpeg"),
+        "jpeg-ultra-hdr-xmp-only": (ultra_hdr(iso=False)[0], "image/jpeg"),
+        "jpeg-gain-map-per-channel": (ultra_hdr(gain_map_xmp=ADOBE_GAIN_MAP_XMP, iso=False)[0], "image/jpeg"),
+        "jpeg-gain-map-not-a-number": (ultra_hdr(gain_map_xmp=ULTRA_HDR_GAIN_MAP_XMP.replace(b'"2.656715"', b'"2,6"', 1), iso=False)[0], "image/jpeg"),
+        "jpeg-gain-map-cut-short": (ultra_hdr()[0][:-len(MP4_WITH_LOCATION) - 500], "image/jpeg"),
+        "jpeg-iphone": (iphone()[0], "image/jpeg"),
+        "jpeg-iphone-no-headroom": (iphone(headroom=None)[0], "image/jpeg"),
+        **{f"fixture-{name}": ((FIXTURES / name).read_bytes(), "image/jpeg")
+           for name in ("gainmap-ultrahdr.jpg", "gainmap-iphone.jpg", "gainmap-adobe-iso.jpg")},
     }
     theirs = run_web_app(tmp_path, (
         "out = {};\nfor (const [name, [b64, type]] of Object.entries(given)) "

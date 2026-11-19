@@ -114,3 +114,189 @@ XMP_MOTION_PHOTO = (b"<x:xmpmeta><rdf:Description GCamera:MotionPhoto=\"1\" "
                     b"GCamera:MicroVideoOffset=\"84\"/></x:xmpmeta>")
 HEIC = b"\x00\x00\x00\x18ftypheic\x00\x00\x00\x00mif1heic" + b"\0" * 32
 SVG = b'<?xml version="1.0"?>\n<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
+
+
+# ── HDR gain maps ──────────────────────────────────────────────────────────
+# What Ultra HDR (Pixel, Samsung, libultrahdr) and iPhones write: a multi-picture JPEG whose second picture
+# is the gain map, described in ISO 21496-1 APP2s, Adobe's hdrgm XMP or Apple's XMP and maker note.
+
+ISO_21496 = b"urn:iso:std:iso:ts:21496:-1\x00"
+# ISO 21496-1 in a primary: the version alone; in a gain map: the version and its parameters (as
+# libultrahdr writes them).
+ISO_VERSION = segment(0xE2, ISO_21496 + b"\x00\x00\x00\x00")
+ISO_PARAMETERS = segment(0xE2, ISO_21496 + bytes.fromhex(
+    "0000000040000000000000000100b3ea8300200000000000000000000100a5700700400000000000010000000100000000000000010000000000000001"))
+
+
+def xmp_segment(xml: bytes) -> bytes:
+    return segment(0xE1, b"http://ns.adobe.com/xap/1.0/\x00" + xml)
+
+
+# A Pixel's primary XMP: the gain map's version and the container directory (with a motion photo's
+# video after the gain map), beside other fields and location.
+ULTRA_HDR_PRIMARY_XMP = b"""<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 5.1.0-jc003">
+  <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+    <rdf:Description rdf:about=""
+        xmlns:hdrgm="http://ns.adobe.com/hdr-gain-map/1.0/"
+        xmlns:xmpNote="http://ns.adobe.com/xmp/note/"
+        xmlns:Container="http://ns.google.com/photos/1.0/container/"
+        xmlns:Item="http://ns.google.com/photos/1.0/container/item/"
+        xmlns:exif="http://ns.adobe.com/exif/1.0/"
+      hdrgm:Version="1.0"
+      xmpNote:HasExtendedXMP="BA3F34D72C675C9BB1B76C15723D23E5"
+      exif:GPSLatitude="51,30.4N" exif:GPSLongitude="0,7.7W">
+      <Container:Directory>
+        <rdf:Seq>
+          <rdf:li rdf:parseType="Resource">
+            <Container:Item Item:Mime="image/jpeg" Item:Semantic="Primary"/>
+          </rdf:li>
+          <rdf:li rdf:parseType="Resource">
+            <Container:Item Item:Mime="image/jpeg" Item:Length="62570" Item:Semantic="GainMap"/>
+          </rdf:li>
+          <rdf:li rdf:parseType="Resource">
+            <Container:Item Item:Mime="video/mp4" Item:Length="4021" Item:Semantic="MotionPhoto"/>
+          </rdf:li>
+        </rdf:Seq>
+      </Container:Directory>
+    </rdf:Description>
+  </rdf:RDF>
+</x:xmpmeta>"""
+# Extended XMP (more of the primary's XMP, in its own APP1), carrying location.
+EXTENDED_XMP = segment(0xE1, b"http://ns.adobe.com/xmp/extension/\x00BA3F34D72C675C9BB1B76C15723D23E5"
+                       + b"\x00\x00\x00\x50\x00\x00\x00\x00" + b'<x:xmpmeta><rdf:Description exif:GPSLatitude="51,30.4N"/></x:xmpmeta>')
+# A Pixel's gain map XMP: the gain map's fields, here beside location.
+ULTRA_HDR_GAIN_MAP_XMP = b"""<?xpacket begin="\xef\xbb\xbf" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="XMP Core 5.5.0">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:hdrgm="http://ns.adobe.com/hdr-gain-map/1.0/"
+    xmlns:exif="http://ns.adobe.com/exif/1.0/"
+   hdrgm:Version="1.0"
+   hdrgm:GainMapMin="0.000000"
+   hdrgm:GainMapMax="2.656715"
+   hdrgm:HDRCapacityMin="0.000000"
+   hdrgm:HDRCapacityMax="2.656715"
+   hdrgm:OffsetHDR="0.000000"
+   hdrgm:OffsetSDR="0.000000"
+   exif:GPSLatitude="51,30.4N"/>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>"""
+# Adobe's per-channel form: three values in an rdf:Seq.
+ADOBE_GAIN_MAP_XMP = b"""<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+<rdf:Description rdf:about="" xmlns:hdrgm="http://ns.adobe.com/hdr-gain-map/1.0/" xmlns:xmp="http://ns.adobe.com/xap/1.0/"
+ hdrgm:Version="1.0" hdrgm:BaseRenditionIsHDR="False" xmp:CreatorTool="Lightroom at 51.5073N">
+ <hdrgm:GainMapMax> <rdf:Seq> <rdf:li>1.5</rdf:li> <rdf:li>2</rdf:li> <rdf:li>2.5e0</rdf:li> </rdf:Seq> </hdrgm:GainMapMax>
+ <hdrgm:Gamma>1</hdrgm:Gamma>
+</rdf:Description></rdf:RDF></x:xmpmeta>"""
+# An iPhone's gain map XMP, here beside location.
+APPLE_GAIN_MAP_XMP = b"""<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="XMP Core 6.0.0">
+   <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+      <rdf:Description rdf:about=""
+            xmlns:apdi="http://ns.apple.com/pixeldatainfo/1.0/"
+            xmlns:HDRGainMap="http://ns.apple.com/HDRGainMap/1.0/"
+            xmlns:exif="http://ns.adobe.com/exif/1.0/">
+         <apdi:NativeFormat>1278226488</apdi:NativeFormat>
+         <apdi:AuxiliaryImageType>urn:com:apple:photo:2020:aux:hdrgainmap</apdi:AuxiliaryImageType>
+         <apdi:StoredFormat>1278226488</apdi:StoredFormat>
+         <HDRGainMap:HDRGainMapVersion>131072</HDRGainMap:HDRGainMapVersion>
+         <HDRGainMap:HDRGainMapHeadroom>3.755272</HDRGainMap:HDRGainMapHeadroom>
+         <exif:GPSLatitude>51,30.4N</exif:GPSLatitude>
+      </rdf:Description>
+   </rdf:RDF>
+</x:xmpmeta>"""
+# An iPhone's depth map, a third picture.
+APPLE_DISPARITY_XMP = (b'<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+                       b'<rdf:Description xmlns:apdi="http://ns.apple.com/pixeldatainfo/1.0/">'
+                       b"<apdi:AuxiliaryImageType>disparity</apdi:AuxiliaryImageType></rdf:Description></rdf:RDF></x:xmpmeta>")
+
+
+def ifd(entries: list[tuple[int, int, int, bytes]], at: int) -> bytes:
+    """A big-endian TIFF IFD placed at ``at`` (where its offsets count from), with its values that do not
+    fit an entry after it: ``entries`` as ``(tag, type, count, value)``."""
+    data_at = at + 2 + 12 * len(entries) + 4
+    head, data = struct.pack(">H", len(entries)), b""
+    for tag, kind, count, value in entries:
+        if len(value) <= 4:
+            head += struct.pack(">HHI", tag, kind, count) + value.ljust(4, b"\0")
+        else:
+            head += struct.pack(">HHII", tag, kind, count, data_at + len(data))
+            data += value
+    return head + b"\0\0\0\0" + data
+
+
+# Apple's maker-note HDR headroom (tags 33 and 48): signed rationals, as an iPhone 15 wrote them.
+APPLE_HEADROOM = (bytes.fromhex("001028aa000fffb5"), bytes.fromhex("000427f700033213"))
+
+
+def apple_exif(orientation: int, headroom: tuple[bytes, bytes] | None = APPLE_HEADROOM) -> bytes:
+    """An iPhone's Exif (a TIFF block): IFD0 with the orientation, the Exif IFD and a GPS IFD; the Exif IFD
+    holds Apple's maker note, with its version, a photo identifier and the HDR headroom (if given)."""
+    fields = [(0x0001, 9, 1, struct.pack(">i", 14)), (0x0011, 2, 37, b"57DB622E-3825-4064-BD4D-51B4F4D516C6\x00")]
+    if headroom:
+        fields += [(0x0021, 10, 1, headroom[0]), (0x0030, 10, 1, headroom[1])]
+    note = b"Apple iOS\x00\x00\x01MM" + ifd(fields, 14)
+    exif_ifd = ifd([(0x927C, 7, len(note), note)], 50)
+    gps_ifd = ifd([(0x0001, 2, 2, b"N\x00"), (0x0002, 5, 3, struct.pack(">6I", 51, 1, 30, 1, 2628, 100))], 50 + len(exif_ifd))
+    ifd0 = ifd([(0x0112, 3, 1, struct.pack(">H", orientation)), (0x8769, 4, 1, struct.pack(">I", 50)),
+                (0x8825, 4, 1, struct.pack(">I", 50 + len(exif_ifd)))], 8)
+    return b"MM\x00\x2a\x00\x00\x00\x08" + ifd0 + exif_ifd + gps_ifd
+
+
+def mpf(entries: list[tuple[int, int, int]], little: bool = False) -> bytes:
+    """A multi-picture index (APP2 MPF), ``entries`` as ``(attribute, size, offset)``."""
+    o = "<" if little else ">"
+    index = (struct.pack(o + "H", 3) + struct.pack(o + "HHI", 0xB000, 7, 4) + b"0100"
+             + struct.pack(o + "HHII", 0xB001, 4, 1, len(entries))
+             + struct.pack(o + "HHII", 0xB002, 7, 16 * len(entries), 50) + struct.pack(o + "I", 0))
+    tiff_head = (b"II\x2a\x00" if little else b"MM\x00\x2a") + struct.pack(o + "I", 8)
+    return segment(0xE2, b"MPF\x00" + tiff_head + index + b"".join(struct.pack(o + "IIIHH", a, s, off, 0, 0) for a, s, off in entries))
+
+
+FRAME = segment(0xC0, struct.pack(">BHHB", 8, 480, 640, 3) + b"\x01\x22\x00\x02\x11\x01\x03\x11\x01")
+
+
+def multi_picture(head: bytes, pictures: list[bytes], trailer: bytes = b"", little: bool = False, scan: bytes = SCANS) -> bytes:
+    """A multi-picture JPEG: a primary of ``head`` (its segments after SOI), a multi-picture index listing
+    ``pictures``, its frame and ``scan``; then the pictures, then ``trailer`` (a motion photo's video)."""
+    index_at = 2 + len(head)
+    primary = 2 + len(head) + len(mpf([(0, 0, 0)] * (1 + len(pictures)))) + len(FRAME) + len(scan)
+    entries, at = [(0x030000, primary, 0)], primary
+    for picture in pictures:
+        entries.append((0, len(picture), at - (index_at + 8)))
+        at += len(picture)
+    return b"\xff\xd8" + head + mpf(entries, little) + FRAME + scan + b"".join(pictures) + trailer
+
+
+def split_pictures(data: bytes) -> tuple[list[tuple[list[bytes], bytes]], bytes]:
+    """``([(image data, picture)], what follows)``: each SOI..EOI picture of a JPEG, one after another, with
+    its image data (every segment that is not APPn or COM, and each scan's entropy-coded bytes)."""
+    pictures, at = [], 0
+    while data[at:at + 3] == b"\xff\xd8\xff":
+        start, parts, at = at, [], at + 2
+        while at + 2 <= len(data) and data[at + 1] != 0xD9:
+            marker = data[at + 1]
+            end = at + 2 + struct.unpack(">H", data[at + 2:at + 4])[0]
+            if not (0xE0 <= marker <= 0xEF or marker == 0xFE):
+                parts.append(data[at:end])
+            at = end
+            if marker == 0xDA:  # the entropy-coded data, up to a marker that is not a stuffed byte or restart
+                scan = at
+                while data[at] != 0xFF or data[at + 1] == 0x00 or 0xD0 <= data[at + 1] <= 0xD7 or data[at + 1] == 0xFF:
+                    at += 1
+                parts.append(data[scan:at])
+        at += 2
+        pictures.append((parts, data[start:at]))
+    return pictures, data[at:]
+
+
+def mpf_entries(picture: bytes) -> tuple[int, list[tuple[int, int, int]]]:
+    """``(where its TIFF header is in the picture, [(attribute, size, offset)])``: a primary's multi-picture index."""
+    at = picture.index(b"MPF\x00") + 4
+    o = "<" if picture[at:at + 2] == b"II" else ">"
+    ifd_at = at + struct.unpack(o + "I", picture[at + 4:at + 8])[0]
+    for i in range(struct.unpack(o + "H", picture[ifd_at:ifd_at + 2])[0]):
+        tag, _, count, value = struct.unpack(o + "HHII", picture[ifd_at + 2 + 12 * i:ifd_at + 14 + 12 * i])
+        if tag == 0xB002:
+            return at, [struct.unpack(o + "III", picture[at + value + 16 * k:at + value + 16 * k + 12]) for k in range(count // 16)]
+    raise AssertionError("no MP entries")

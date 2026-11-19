@@ -82,13 +82,14 @@ the notes in the `reading-list` graph". The tools appear as
 `server/` is a copy of the private graph-notes repo's `mcp-server/` directory, which is where the
 server is developed. The copy is never edited here.
 
-- **Copied from:** graph-notes commit `bd8e83ec988ea7df984b76e81cc88fd84e48e849`
+- **Copied from:** graph-notes commit `eb3c201c43547fb06d061b9a8dc6f0be1b092333`
   (graph-notes PR 39, which added the picture tools `list_images` and `attach_image`, copies
   other graphs' pictures in through `add_notes`, `update_notes` and `copy_graph`, and puts each
   graph's pictures in the Obsidian download at `attachments/<slug>/`; and PR 42, after which
   location and other metadata are removed from every part of an uploaded picture; and PR 44,
   after which a picture path inside a web URL is left alone, and a picture is copied in only
-  once the edit that names it is known to be valid).
+  once the edit that names it is known to be valid; and PR 45, after which an HDR photo keeps
+  its gain map, with the gain map's own metadata removed too).
 - `SERVER_SOURCE` records that commit and a sha256 for every file in `server/`. CI
   (`scripts/check-path-plugins.mjs`) fails if `server/` differs from it in any way: a file
   changed, added or removed by hand. It also fails if this README names a different commit.

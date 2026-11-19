@@ -11,6 +11,10 @@ app's outdated-save check (HTTP 409) is never worked around and newer work is ne
 overwritten.
 
 There is no tool that deletes a graph forever, and ``client`` cannot send that request.
+Nor is there one that deletes an image from a graph's library (Delete image, in the web
+app), or that downloads anything from a web address: a picture comes in only from a file
+on this computer that the person or the model names (``attach_image``), or as a copy of
+one another graph already holds.
 """
 
 from __future__ import annotations
@@ -34,7 +38,7 @@ from fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from . import canvas, client
+from . import canvas, client, images
 from .client import Api, ApiError
 from .guide import GUIDE, INSTRUCTIONS
 from .session import Session, SignInError
@@ -216,6 +220,29 @@ def save_new_file(folder: Path, name: str, data: bytes) -> Path:
     raise ToolError(f"'{folder}' already has a thousand files named like {name}; choose another folder")
 
 
+COPY_BATCH = 15  # the app copies at most this many images in one request
+
+
+def pasted_text(text: str, paths: dict[str, str], missing: list[tuple[str, str]]) -> str:
+    """``text`` as the web app pastes it into another graph: each copied picture's path rewritten
+    (``paths``: old path -> new path), each picture that could not be copied left out."""
+    text = images.rewrite_images(text, paths)
+    for source, file in missing:
+        text = images.without_image(text, source, file)
+    return text
+
+
+def paste_report(paths: dict[str, str], missing: list[tuple[str, str]], texts: list[str]) -> dict:
+    """What a result says about the pictures a change copied in, or had to leave out."""
+    report: dict = {}
+    if paths:
+        report["images_copied"] = sorted(set(paths.values()))
+    if missing:
+        names = ", ".join(images.picture_name(texts, source, file) for source, file in missing)
+        report["notices"] = [f"Saved without {names}: not available (deleted, or no longer public)."]
+    return report
+
+
 def build_server(api: Api) -> FastMCP:
     """The server over ``api``; tests pass an ``Api`` whose ``send`` is a stand-in for the app."""
     mcp = FastMCP("graph-notes", instructions=INSTRUCTIONS, version=importlib.metadata.version("graph-notes-mcp"))
@@ -256,15 +283,41 @@ def build_server(api: Api) -> FastMCP:
                 raise
         raise changed(sent, read(slug))
 
-    def edit(slug: str, version: int, change: Callable[[dict], tuple[dict, dict]]) -> dict:
-        """Applies ``change`` (canvas -> (canvas, what to report)) to version ``version`` of my graph and saves it."""
+    def editable(slug: str, version: int) -> dict:
+        """My graph ``slug``, as it is at ``version``; else the reason it cannot be changed from there."""
         graph = read(slug)
         if not graph["mine"]:
             raise ToolError(f"'{slug}' is someone else's public graph: you can read it and copy it, but not change it.")
         if graph["version"]["n"] != version:
             raise changed(version, graph)
-        after, report = change(graph["canvas"])
+        return graph
+
+    def edit(slug: str, version: int, change: Callable[[dict], tuple[dict, dict]]) -> dict:
+        """Applies ``change`` (canvas -> (canvas, what to report)) to version ``version`` of my graph and saves it."""
+        after, report = change(editable(slug, version)["canvas"])
         return {**saved(slug, version, lambda: client.save_graph(api, slug, version, canvas=after)), **report}
+
+    def copy_in(slug: str, wanted: dict[str, list[str]]) -> tuple[dict[str, str], list[tuple[str, str]]]:
+        """Copies ``wanted`` (``{source slug: [files]}``) into my graph ``slug``'s library, as the web app's
+        paste does: ``(old path -> new path, [(source, file) that could not be copied])``."""
+        paths: dict[str, str] = {}
+        missing: list[tuple[str, str]] = []
+        for source, files in wanted.items():
+            for at in range(0, len(files), COPY_BATCH):
+                answer = client.copy_images(api, slug, source, files[at:at + COPY_BATCH])
+                paths |= {images.image_path(source, file): path for file, path in answer["copied"].items()}
+                missing += [(source, file) for file in answer["unavailable"]]
+        return paths, missing
+
+    def paste(slug: str, texts: list[str]) -> tuple[Callable[[str], str], dict]:
+        """Copies the pictures ``texts`` show from other graphs into my graph ``slug``'s library first:
+        ``(how each text is then saved, what the result says about it)``."""
+        paths, missing = copy_in(slug, images.foreign_images(texts, slug))
+        return (lambda text: pasted_text(text, paths, missing)), paste_report(paths, missing, texts)
+
+    def with_notices(report: dict, notices: list[str]) -> dict:
+        both = [*report.get("notices", []), *notices]
+        return {**report, **({"notices": both} if both else {})}
 
     # ── learning what there is ─────────────────────────────────────────────
 
@@ -338,14 +391,25 @@ def build_server(api: Api) -> FastMCP:
         new_slug: Annotated[str | None, Field(description="The copy's address; leave out to derive it from the title.")] = None,
     ) -> dict:
         """Makes a new private graph with the same notes, links and layout as an existing one (one of the
-        person's, or someone else's public graph). The original is not changed; history is not copied."""
+        person's, or someone else's public graph). The original is not changed; history is not copied.
+        Its pictures are copied into the new graph's library, and its notes show the copies: from one of
+        the person's own graphs, its whole image library; from someone else's, the pictures its notes show."""
         source = read(slug)
+        doc = source["canvas"]
+        texts = [n["text"] for n in doc.get("nodes") or [] if n.get("type") == "text" and isinstance(n.get("text"), str)]
         made = client.create_graph(api, new_slug or slug_for(title), title)
         try:
-            return summary(api.app_url, client.save_graph(api, made["slug"], made["version"]["n"], canvas=source["canvas"]))
+            wanted = images.foreign_images(texts, made["slug"])
+            if source["mine"]:  # the whole library, pictures on no card included: the person's own
+                wanted[slug] = list(dict.fromkeys([*wanted.get(slug, []), *(e["file"] for e in client.list_images(api, slug))]))
+            paths, missing = copy_in(made["slug"], wanted)
+            nodes = [{**n, "text": pasted_text(n["text"], paths, missing)}
+                     if n.get("type") == "text" and isinstance(n.get("text"), str) else n for n in doc.get("nodes") or []]
+            copied = client.save_graph(api, made["slug"], made["version"]["n"], canvas={**doc, "nodes": nodes})
         except ApiError as failure:
             raise ApiError(failure.status, (
                 f"'{made['slug']}' was created but copying into it failed, so it is empty: {failure.message}")) from None
+        return {**summary(api.app_url, copied), **paste_report(paths, missing, texts)}
 
     @tool(ADDS)
     def rename_graph(slug: Slug, version: Version, title: Annotated[str, Field(description="The new title.")]) -> dict:
@@ -389,8 +453,9 @@ def build_server(api: Api) -> FastMCP:
             "The folder on this computer to save the zip in; leave out for the Downloads folder."))] = None,
     ) -> dict:
         """The web app's "Download for Obsidian": saves a zip of every one of the person's graphs (not the
-        trash), each as an Obsidian canvas, to a new file on this computer, and says where. Unzip it, then
-        in Obsidian: Open folder as vault. It never overwrites a file. Only do this when the person asks."""
+        trash), each as an Obsidian canvas, with each graph's image library under attachments/<slug>/, to a
+        new file on this computer, and says where. Unzip it, then in Obsidian: Open folder as vault. It
+        never overwrites a file. Only do this when the person asks."""
         place = Path(folder).expanduser() if folder else Path.home() / "Downloads"
         if not place.is_dir():
             raise ToolError(f"'{place}' is not a folder on this computer; name one that exists, or leave folder out")
@@ -399,11 +464,40 @@ def build_server(api: Api) -> FastMCP:
             names = zipfile.ZipFile(io.BytesIO(data)).namelist()
         except zipfile.BadZipFile:
             raise ToolError("the app's download came back cut short or damaged; nothing was saved. Try again.") from None
+        pictures = client.export_images(api)
         day = datetime.datetime.now(datetime.timezone.utc).date().isoformat()  # the app's own name for it
         saved = save_new_file(place.resolve(), f"graph-notes-{day}.zip", data)
-        return {"path": str(saved), "bytes": len(data),
+        try:
+            added, missing = add_attachments(saved, pictures)
+        except BaseException:
+            saved.unlink(missing_ok=True)
+            raise
+        return {"path": str(saved), "bytes": saved.stat().st_size,
                 "graphs": sorted(n.split("/", 1)[1][:-len(".canvas")] for n in names if n.endswith(".canvas")),
+                "images": added, **({"images_missing": missing} if missing else {}),
                 "next": "Unzip it, then in Obsidian: Open folder as vault. Edits made there are not sent back."}
+
+    def add_attachments(zip_path: Path, pictures: list[dict]) -> tuple[int, list[str]]:
+        """Adds each library image to the saved zip at ``graph-notes/attachments/<slug>/<file>``, where the
+        notes' paths find it from the vault's root, fetched one at a time so only one is ever in memory.
+        Returns how many it added, and the paths it could not fetch (deleted since the list was made)."""
+        added, missing = 0, []
+        try:
+            with zipfile.ZipFile(zip_path, "a") as archive:
+                for picture in pictures:
+                    found = images.PATH.fullmatch(picture.get("path", ""))
+                    if not found:
+                        continue
+                    data = client.image_bytes(api, found[1], found[2])
+                    if data is None:
+                        missing.append(picture["path"])
+                        continue
+                    # Stored as they are: pictures are compressed already.
+                    archive.writestr(f"graph-notes/{picture['path']}", data, compress_type=zipfile.ZIP_STORED)
+                    added += 1
+        except OSError as failure:
+            raise ToolError(f"could not save the zip in '{zip_path.parent}': {failure.strerror or failure}") from None
+        return added, missing
 
     # ── notes and links ────────────────────────────────────────────────────
 
@@ -419,20 +513,28 @@ def build_server(api: Api) -> FastMCP:
         """Adds notes (and web-page cards: give a url instead of text) to a graph, with the links between
         them, all in one saved version, and returns the new ids. The server chooses where each note goes
         on the canvas: notes linked to each other are laid out left to right along their links, beside
-        the notes they relate to."""
+        the notes they relate to. A picture line copied from another graph's note
+        (![name](attachments/<other slug>/<file>)) brings that picture into this graph's library first, as
+        a paste in the web app does."""
         def change(doc: dict) -> tuple[dict, dict]:
-            after, added, linked = canvas.add_notes(doc, [n.model_dump() for n in notes], [l.model_dump() for l in links])
-            return after, {"added": added, **({"links_added": linked} if linked else {})}
+            pasted, report = paste(slug, [n.text for n in notes if n.text])
+            given = [{**n.model_dump(), **({"text": pasted(n.text)} if n.text else {})} for n in notes]
+            after, added, linked = canvas.add_notes(doc, given, [l.model_dump() for l in links])
+            return after, {"added": added, **({"links_added": linked} if linked else {}), **report}
         return edit(slug, version, change)
 
     @tool(REPLACES)
     def update_notes(slug: Slug, version: Version, notes: Annotated[list[NoteChange], Field(min_length=1)]) -> dict:
         """Changes the text and/or the clusters of existing notes, the address of web-page cards and the
         vault path of file cards, all in one saved version. Everything else about each card (its place,
-        size and look) stays as it is."""
+        size and look) stays as it is. A picture line copied from another graph's note brings that
+        picture into this graph's library first, as add_notes does. Taking a picture's line out of a
+        note leaves the picture in the library (list_images); only the person can delete it, in the web app."""
         def change(doc: dict) -> tuple[dict, dict]:
-            after, notices = canvas.update_notes(doc, [note.model_dump() for note in notes])
-            return after, {"updated": [note.id for note in notes], **({"notices": notices} if notices else {})}
+            pasted, report = paste(slug, [n.text for n in notes if n.text])
+            given = [{**n.model_dump(), **({"text": pasted(n.text)} if n.text else {})} for n in notes]
+            after, notices = canvas.update_notes(doc, given)
+            return after, with_notices({"updated": [note.id for note in notes], **report}, notices)
         return edit(slug, version, change)
 
     @tool(REPLACES)
@@ -530,6 +632,83 @@ def build_server(api: Api) -> FastMCP:
             after, links = canvas.remove_group_boxes(doc, box_ids)
             return after, {"removed": box_ids, **({"links_removed": links} if links else {})}
         return edit(slug, version, change)
+
+    # ── images ─────────────────────────────────────────────────────────────
+
+    @tool(READS)
+    def list_images(slug: Slug) -> dict:
+        """Lists a graph's image library, newest first: each picture's path (what a note's
+        ![name](path) line carries), its name, type, size in bytes and pixels, and the notes that
+        show it (none: it is in the library only). Only for the person's own graphs."""
+        graph = read(slug)
+        if not graph["mine"]:
+            raise ToolError(f"'{slug}' is someone else's public graph: its image library is theirs. read_graph shows "
+                            "the pictures its notes show, and copy_graph or a note's picture line copies them.")
+        shows = images.usage(graph["canvas"], slug)
+        return {"slug": slug, "version": graph["version"]["n"], "images": [
+            {"path": e["path"], "name": e["name"], "content_type": e["content_type"], "bytes": e["bytes"],
+             "width": e["width"], "height": e["height"], "added_at": e["created_at"], "notes": shows.get(e["file"], [])}
+            for e in client.list_images(api, slug)]}
+
+    @tool(ADDS)
+    def attach_image(
+        slug: Slug,
+        version: Version,
+        note_id: Annotated[str, Field(description="The id of the note to show the picture in (a note, not a web-page or file card).")],
+        path: Annotated[str, Field(description=(
+            "The picture's file on this computer, e.g. '~/Desktop/whiteboard.png': a PNG, JPEG, WebP or GIF. "
+            "Never a web address: a picture on the web goes in a note's text as ![name](https://...)."))],
+        alt: Annotated[str | None, Field(description=(
+            "The picture's name in the note (its alt text); leave out for the file's name."))] = None,
+    ) -> dict:
+        """Adds a picture from a file on this computer (a screenshot, a downloaded file) to the graph's
+        image library, and shows it in a note: its ![name](attachments/<slug>/<file>) line goes under the
+        note's first line, in one saved version. A note with no text takes the picture's shape (its height
+        fits the picture, up to 600). Location and other metadata are removed from the file first, without
+        changing a pixel. A picture the library already has is not stored twice. Only do this with a file
+        the person named or asked for."""
+        file = Path(path).expanduser()
+        if not file.is_file():
+            raise ToolError(f"'{file}' is not a file on this computer; name a picture file that exists")
+        if file.stat().st_size > images.CLOUDFLARE_MAX_BYTES:
+            raise ToolError("Cloudflare doesn't accept uploads over 100 MB on this site's plan; choose a smaller file")
+        try:
+            data = file.read_bytes()
+        except OSError as failure:
+            raise ToolError(f"could not read '{file}': {failure.strerror or failure}") from None
+        kind = images.sniff(data)
+        if kind == "heic":
+            raise ToolError("HEIC isn't accepted: export it as JPEG or PNG first")
+        if kind == "svg":
+            raise ToolError("SVG isn't accepted (it can carry scripts): export it as PNG")
+        if kind is None:
+            raise ToolError(f"'{file.name}' is not a PNG, JPEG, WebP or GIF image: only those can be added")
+        graph = editable(slug, version)
+        note = next((n for n in graph["canvas"].get("nodes") or [] if n.get("id") == note_id), None)
+        if note is None:
+            raise ToolError(f"'{slug}' has no note with id '{note_id}' (read_graph lists them)")
+        if note.get("type") != "text":
+            card = "a group box" if note.get("type") == "group" else "a web-page or file card"
+            raise ToolError(f"'{note_id}' is {card}, not a note: a picture goes in a note's text")
+        kept = images.strip_metadata(data, kind)
+        entry, added = client.upload_image(api, slug, client.Upload(kind, kept, file.name))
+        text = note.get("text") or ""
+        shaped = {}
+        if images.is_empty_note(text) and entry.get("width") and entry.get("height") and note.get("width"):
+            size = images.drawn_size(kept, kind, (entry["width"], entry["height"]))
+            shaped = {"height": images.fitted_height(note["width"], size)}
+        after = {**note, "text": images.insert_image_line(text, images.image_line(alt or entry["name"], entry["path"])), **shaped}
+        doc = {**graph["canvas"], "nodes": [after if n is note else n for n in graph["canvas"]["nodes"]]}
+        shown = {"path": entry["path"], "name": entry["name"], "note": note_id,
+                 **({} if added else {"already_in_library": True})}
+        try:
+            return {**summary(api.app_url, client.save_graph(api, slug, version, canvas=doc)), **shown}
+        except ApiError as failure:
+            if failure.status != 409:
+                raise ApiError(failure.status, f"The picture is in the library as {entry['path']}, but the note was "
+                                               f"not changed: {failure.message}") from None
+        raise ToolError(f"The picture is in the library as {entry['path']}, but the note was not changed. "
+                        f"{changed(version, read(slug))}", log_level=logging.WARNING)
 
     return mcp
 

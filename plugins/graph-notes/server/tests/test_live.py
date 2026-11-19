@@ -4,7 +4,8 @@ harness runs it, the saved cloudflared sign-in, and the live app.
 Opt-in, never in CI:  GRAPH_NOTES_LIVE=1 uv run pytest tests/test_live.py -s
 
 It touches only graphs it creates, named ``mcp-test-<time>...`` (``live_guard`` refuses
-any other slug before a call is made), leaves them in the trash, and checks at the end
+any other slug before a call is made, and any picture path of another graph), attaches
+one picture it draws itself, from a temporary folder, leaves them in the trash, and checks at the end
 that every other graph of the account is exactly as it was. It needs a saved sign-in
 and will not start one: run ``cloudflared access login <app>/signin`` first.
 """
@@ -15,6 +16,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -24,6 +26,7 @@ from fastmcp.client.transports import StdioTransport
 
 from graph_notes_mcp.server import APP_URL, sign_in_url
 from live_guard import PREFIX, guarded
+from pictures import png, png_chunk
 
 pytestmark = pytest.mark.skipif(os.environ.get("GRAPH_NOTES_LIVE") != "1", reason="live run: set GRAPH_NOTES_LIVE=1")
 
@@ -36,11 +39,11 @@ def others(listed: dict, trash: dict) -> list:
     return sorted(row for row in rows if not row[0].startswith(PREFIX))
 
 
-async def live_run(report) -> None:
+async def live_run(report, pictures_dir: str) -> None:
     transport = StdioTransport(command=sys.executable, args=["-m", "graph_notes_mcp"], cwd=str(PROJECT),
                                env={"PATH": os.environ["PATH"], "HOME": os.environ["HOME"]})
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    slug, copy = f"{PREFIX}{stamp}", f"{PREFIX}{stamp}-copy"
+    slug, copy, pictured_copy = f"{PREFIX}{stamp}", f"{PREFIX}{stamp}-copy", f"{PREFIX}{stamp}-pictures"
 
     async with Client(transport) as mcp:
         async def call(tool: str, **arguments):
@@ -192,6 +195,33 @@ async def live_run(report) -> None:
                 {"id": card["id"], "kind": "web page", "url": "https://example.org/start", "clusters": []}]
             report("add_notes with a url, update_notes url: a web-page card made and its address changed")
 
+            picture = Path(pictures_dir) / "live-test-board.png"
+            picture.write_bytes(png(320, 180, rgb=(48, 164, 108),
+                                    extra=png_chunk(b"tEXt", b"Comment\0made by the MCP live test")))
+            empty = await ok("add_notes", slug=slug, version=20, notes=[{"text": "", "clusters": ["live-test"]}])
+            board = empty["added"][0]["id"]
+            attached = await ok("attach_image", slug=slug, version=21, note_id=board, path=str(picture))
+            assert attached["version"] == 22 and attached["path"].startswith(f"attachments/{slug}/img_")
+            assert attached["name"] == "live-test-board.png" and "already_in_library" not in attached
+            again = await ok("attach_image", slug=slug, version=22, note_id=second, path=str(picture), alt="Board, again")
+            assert again["path"] == attached["path"] and again["already_in_library"] is True
+            laid = await ok("read_graph", slug=slug, layout=True)
+            shown = next(n for n in laid["notes"] if n["id"] == board)
+            assert shown["text"] == f"![live-test-board.png]({attached['path']})" and shown["height"] < 260
+            listed = await ok("list_images", slug=slug)
+            assert [(e["path"], e["notes"], e["width"], e["height"]) for e in listed["images"]] == [
+                (attached["path"], [second, board], 320, 180)]
+            assert listed["images"][0]["bytes"] == len(picture.read_bytes()) - len(png_chunk(b"tEXt", b"Comment\0made by the MCP live test"))
+            report(f"attach_image, list_images: a local PNG in the library as {attached['path']}, its text chunk removed, "
+                   "an empty note fitted to it, the same file again stored once")
+
+            pictured = await ok("copy_graph", slug=slug, title="MCP live test picture copy (safe to delete)", new_slug=pictured_copy)
+            assert pictured["images_copied"] == [attached["path"].replace(f"/{slug}/", f"/{pictured_copy}/")]
+            copied_list = await ok("list_images", slug=pictured_copy)
+            assert [e["path"] for e in copied_list["images"]] == pictured["images_copied"]
+            assert sorted(copied_list["images"][0]["notes"]) == sorted([second, board])
+            report(f"copy_graph with a picture: {pictured_copy} has its own copy, and its notes show it")
+
             trashed = await ok("trash_graph", slug=slug)
             assert trashed["trashed_at"]
             assert slug in [g["slug"] for g in (await ok("list_trash"))["trash"]]
@@ -200,14 +230,15 @@ async def live_run(report) -> None:
             assert "trashed_at" not in back and slug in [g["slug"] for g in (await ok("list_graphs"))["mine"]]
             report("trash_graph, list_trash, restore_from_trash: there and back")
         finally:
-            for test_graph in (slug, copy):  # leave the test graphs in the trash, whatever happened above
+            for test_graph in (slug, copy, pictured_copy):  # leave the test graphs in the trash, whatever happened above
                 await call("trash_graph", slug=test_graph)
 
         trash = [g["slug"] for g in (await ok("list_trash"))["trash"]]
-        assert slug in trash and copy in trash
+        assert slug in trash and copy in trash and pictured_copy in trash
         after = others(await ok("list_graphs"), await ok("list_trash"))
         assert after == before, "a graph that is not this test's changed"
-        report(f"clean up: {slug} and {copy} are in the trash; the {len(after)} other graphs are exactly as before")
+        report(f"clean up: {slug}, {copy} and {pictured_copy} are in the trash; "
+               f"the {len(after)} other graphs are exactly as before")
 
 
 def test_every_tool_against_the_live_app():
@@ -216,4 +247,5 @@ def test_every_tool_against_the_live_app():
     if saved.returncode != 0:
         pytest.fail(f"no saved sign-in: run `cloudflared access login {sign_in_url(APP_URL)}` once, then run this again", pytrace=False)
     # Printed, not captured through a fixture: the stdio client hands the real stderr to the server (run with -s).
-    asyncio.run(live_run(lambda line: print(f"PASS | {line}", flush=True)))
+    with tempfile.TemporaryDirectory() as pictures_dir:
+        asyncio.run(live_run(lambda line: print(f"PASS | {line}", flush=True), pictures_dir))

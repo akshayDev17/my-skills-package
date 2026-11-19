@@ -19,6 +19,7 @@ TOOLS = {
     "trash_graph", "restore_from_trash",
     "add_notes", "update_notes", "remove_notes", "link_notes", "unlink_notes", "update_links", "style_notes",
     "add_group_boxes", "update_group_boxes", "remove_group_boxes", "move_notes", "download_for_obsidian",
+    "list_images", "attach_image",
 }
 
 
@@ -41,12 +42,13 @@ def new_graph(app: App, title: str = "Plan") -> dict:
     return app.call("create_graph", title=title)
 
 
-def test_the_tools_are_the_graph_features_and_none_deletes_forever(app):
+def test_the_tools_are_the_graph_features_and_none_deletes_forever_or_deletes_an_image(app):
     async def listed():
         async with Client(app.server) as mcp_client:
             return await mcp_client.list_tools()
     tools = asyncio.run(listed())
     assert {t.name for t in tools} == TOOLS
+    assert not any("delete" in t.name for t in tools)
     assert all(t.description and len(t.description) > 40 for t in tools)
     # Nothing a model must send is in canvas terms, and only moving things by hand takes a place or a size.
     schemas = json.dumps([t.input_schema for t in tools]).lower()

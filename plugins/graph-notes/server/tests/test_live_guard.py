@@ -43,3 +43,13 @@ def test_the_obsidian_download_is_refused_whatever_it_is_given():
     for arguments in ({}, {"folder": "/tmp"}, {"slug": "mcp-test-1"}):
         with pytest.raises(NotATestGraph, match="download_for_obsidian refused"):
             guarded("download_for_obsidian", arguments)
+
+
+def test_a_picture_of_a_graph_that_is_not_a_test_graphs_is_refused_in_any_argument():
+    real = "![p](attachments/example/img_0123456789abcdef.png)"
+    for tool, arguments in (("add_notes", {"slug": "mcp-test-1", "version": 2, "notes": [{"text": real}]}),
+                            ("update_notes", {"slug": "mcp-test-1", "version": 2, "notes": [{"id": "n", "text": f"x {real}"}]})):
+        with pytest.raises(NotATestGraph, match="names a picture of 'example'"):
+            guarded(tool, arguments)
+    ours = {"slug": "mcp-test-1-copy", "version": 2, "notes": [{"text": "![p](attachments/mcp-test-1/img_0123456789abcdef.png)"}]}
+    assert guarded("add_notes", ours) is ours

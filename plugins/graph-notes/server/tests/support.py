@@ -5,7 +5,8 @@ over in-memory SQLite, the same code the Worker runs): it refuses Python's defau
 user agent with error 1010 and answers a request without a valid session with Access's
 redirect, as the live edge does, then signs the request the way Access does and hands
 it to ``serve``. So the same-origin rule, the outdated-save check and every route are
-the app's own, not a copy of them.
+the app's own, not a copy of them. Its image bucket is the app's own stand-in for R2,
+``LocalBucket``, in memory.
 
 ``FakeCloudflared`` stands in for the ``cloudflared`` binary behind ``Session.run``.
 """
@@ -25,14 +26,17 @@ from pathlib import Path
 
 from fastmcp import Client
 
+from pictures import png
+
 REPO = Path(__file__).resolve().parents[2]
 BACKEND = REPO / "backend"
 sys.path.insert(0, str(BACKEND))
 
 from dev_access import claims_for, jwks, mint, shared_key  # noqa: E402
 from graph_notes import store  # noqa: E402
-from graph_notes.api import ApiRequest, iso, serve  # noqa: E402
+from graph_notes.api import ApiRequest, is_upload, iso, serve  # noqa: E402
 from graph_notes.auth import AccessConfig, KeyCache  # noqa: E402
+from graph_notes.local_bucket import LocalBucket  # noqa: E402
 from graph_notes.sqlite_binding import SqliteD1  # noqa: E402
 
 from graph_notes_mcp.client import Api, Response  # noqa: E402
@@ -70,6 +74,7 @@ class FakeEdge:
         self.origin = origin
         connection = sqlite3.connect(":memory:", check_same_thread=False)  # tools run on worker threads
         self.db = SqliteD1(connection)
+        self.bucket = LocalBucket()
         for migration in sorted((BACKEND / "migrations").glob("*.sql")):
             self.db.executescript(migration.read_text())
         self.access = AccessConfig(TEAM, frozenset({AUD}), frozenset({origin}))
@@ -93,7 +98,7 @@ class FakeEdge:
             headers |= {"origin": self.origin, "x-graph-notes": "1", "content-type": "application/json"}
         with self._lock:
             reply = asyncio.run(serve(ApiRequest(method, f"/graph/api{path}", {}, headers, json.dumps(body or {})),
-                                      self.db, self.access, self.keys, time.time()))
+                                      self.db, self.bucket, self.access, self.keys, time.time()))
         assert reply.status < 400, reply.body
         return reply.body
 
@@ -114,9 +119,12 @@ class FakeEdge:
         path, _, query = url[len(self.origin):].partition("?")
         params = dict(pair.split("=", 1) for pair in query.split("&") if pair)
         headers["cf-access-jwt-assertion"] = mint(shared_key(), claims_for(OWNER, TEAM, AUD, time.time()))
+        # An image upload is the file itself, as the Worker hands R2 the request's stream.
+        upload = is_upload(method, path)
+        text, stream = ("", body or None) if upload else ((body or b"").decode(), None)
         with self._lock:
-            reply = asyncio.run(serve(ApiRequest(method, path, params, headers, (body or b"").decode()),
-                                      self.db, self.access, self.keys, time.time()))
+            reply = asyncio.run(serve(ApiRequest(method, path, params, headers, text, stream),
+                                      self.db, self.bucket, self.access, self.keys, time.time()))
         payload = reply.body if isinstance(reply.body, bytes) else json.dumps(reply.body).encode()
         return Response(reply.status, payload)
 
@@ -247,6 +255,15 @@ def tour(app: App) -> list:
     do("update_links", slug="tour", version=16, links=[{"id": added["links_added"][0]["id"], "label": "on to", "direction": "backward",
                                                         "line": "dotted", "from_side": "bottom", "to_side": "top"}])
     do("style_notes", slug="tour", version=17, notes=[{"id": two, "color": "blue"}])
+    # pictures: a file on this computer attached, listed, copied with its graph, and a stale attach
+    picture = Path(app.downloads.name) / "board.png"
+    picture.write_bytes(png(8, 6))
+    do("create_graph", title="Pictures")
+    card = do("add_notes", slug="pictures", version=1, notes=[{"text": "Board"}])["added"][0]["id"]
+    do("attach_image", slug="pictures", version=2, note_id=card, path=str(picture))
+    do("attach_image", slug="pictures", version=2, note_id=card, path=str(picture))
+    do("list_images", slug="pictures")
+    do("copy_graph", slug="pictures", title="Pictures copy")
     do("download_for_obsidian", folder=app.downloads.name)
     do("download_for_obsidian", folder=f"{app.downloads.name}/no-such-folder")
     return results

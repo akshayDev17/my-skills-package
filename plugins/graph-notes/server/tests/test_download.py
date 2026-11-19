@@ -44,7 +44,9 @@ def test_the_zip_is_the_one_the_app_downloads_saved_under_the_apps_name(app, tmp
     served = app.edge.as_user("GET", "/export")
     assert entries(path.read_bytes()) == entries(served)  # what the app's route answers, but for when it was made
     assert "graph-notes/README.md" in entries(served) and "graph-notes/example.canvas" in entries(served)
-    assert [r[:2] for r in app.edge.requests[-1:]] == [("GET", "https://graph.test/graph/api/export")]
+    assert [r[:2] for r in app.edge.requests[-2:]] == [("GET", "https://graph.test/graph/api/export"),
+                                                       ("GET", "https://graph.test/graph/api/export/images")]
+    assert saved["images"] == 0 and "images_missing" not in saved
 
 
 def test_a_second_download_never_overwrites_the_first(app, tmp_path):

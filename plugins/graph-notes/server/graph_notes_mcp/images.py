@@ -24,7 +24,11 @@ CLOUDFLARE_MAX_BYTES = 100_000_000
 # How tall an empty card grows to take an image's shape (the web app's MAX_FIT_HEIGHT).
 MAX_FIT_HEIGHT = 600
 
-PATH = re.compile(rf"attachments/({SLUG.pattern})/({IMAGE_FILE.pattern})")
+# Where a library path can start: a line's start, after a space, `(` or `<` (a link's target), or
+# after `./` there; never inside a web address such as https://host/vault/attachments/<slug>/<file>,
+# which is a web image (the web app's PATH_START, frontend/lib/images.ts).
+PATH_START = r"(?:(?<![^ \t\r\n(<])|(?<=\./)(?<![^ \t\r\n(<]\./))"
+PATH = re.compile(rf"{PATH_START}attachments/({SLUG.pattern})/({IMAGE_FILE.pattern})")
 _PICTURE = re.compile(rf"!\[([^\]\n]*)\]\(\s*<?attachments/({SLUG.pattern})/({IMAGE_FILE.pattern})")
 
 
@@ -84,7 +88,7 @@ def _mentions(slug: str, file: str) -> tuple[re.Pattern[str], re.Pattern[str], r
     lead, trail = r"(?P<lead>[ \t]*)", r"(?P<trail>[ \t]*)"
     return (re.compile(rf"{lead}!\[[^\]\n]*\]{target}{trail}"),
             re.compile(rf"{lead}\[(?P<text>[^\]\n]*)\]{target}{trail}"),
-            re.compile(rf"{lead}{path}{trail}"))
+            re.compile(rf"{lead}{PATH_START}{path}{trail}"))
 
 
 def _close_gap(m: re.Match[str]) -> str:

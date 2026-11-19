@@ -239,6 +239,31 @@ def test_update_notes_copies_too_and_a_picture_it_cannot_copy_is_left_out_with_a
     assert done["notices"] == ["Saved without Secret plan: not available (deleted, or no longer public)."]
 
 
+def test_an_edit_that_fails_copies_no_picture_in(app, tmp_path):
+    _, path = attached(app, tmp_path, "rag", "board.png", png(12, 8))
+    version, card = note(app, "plan")
+    line = f"![board.png]({path})"
+    with pytest.raises(ToolError, match="'nope' names no note"):
+        app.call("update_notes", slug="plan", version=version, notes=[{"id": "nope", "text": line}])
+    with pytest.raises(ToolError, match="names no note"):
+        app.call("add_notes", slug="plan", version=version, notes=[{"text": line, "key": "new"}],
+                 links=[{"from_note": "new", "to_note": "nope"}])
+    with pytest.raises(ToolError, match="a web-page card has a url and nothing else"):
+        app.call("add_notes", slug="plan", version=version, notes=[{"text": line}, {"url": "https://example.com", "text": "x"}])
+    assert app.call("list_images", slug="plan")["images"] == []
+    assert text_of(app, "plan", card) == "Whiteboard"
+
+
+def test_a_picture_on_the_web_is_saved_as_it_is_and_copies_nothing(app, tmp_path):
+    _, path = attached(app, tmp_path, "rag", "board.png", png(12, 8))
+    version, _ = note(app, "plan")
+    line = f"![board](https://raw.githubusercontent.com/me/vault/main/{path})"
+    added = app.call("add_notes", slug="plan", version=version, notes=[{"text": line}])
+    assert "images_copied" not in added and "notices" not in added
+    assert text_of(app, "plan", added["added"][0]["id"]) == line
+    assert app.call("list_images", slug="plan")["images"] == []
+
+
 def test_someone_elses_public_picture_copies_only_while_their_note_shows_it(app, tmp_path):
     shown = png(6, 6, rgb=(1, 2, 3))
     app.edge.seed("theirs", {"nodes": [], "edges": []}, owner=OTHER)

@@ -515,11 +515,14 @@ def build_server(api: Api) -> FastMCP:
         on the canvas: notes linked to each other are laid out left to right along their links, beside
         the notes they relate to. A picture line copied from another graph's note
         (![name](attachments/<other slug>/<file>)) brings that picture into this graph's library first, as
-        a paste in the web app does."""
+        a paste in the web app does, once the notes and links are known to be right: a change that is refused
+        copies nothing."""
         def change(doc: dict) -> tuple[dict, dict]:
+            given, edges = [n.model_dump() for n in notes], [l.model_dump() for l in links]
+            canvas.add_notes(doc, given, edges)  # an edit that fails copies no picture in
             pasted, report = paste(slug, [n.text for n in notes if n.text])
-            given = [{**n.model_dump(), **({"text": pasted(n.text)} if n.text else {})} for n in notes]
-            after, added, linked = canvas.add_notes(doc, given, [l.model_dump() for l in links])
+            given = [{**g, **({"text": pasted(g["text"])} if g["text"] else {})} for g in given]
+            after, added, linked = canvas.add_notes(doc, given, edges)
             return after, {"added": added, **({"links_added": linked} if linked else {}), **report}
         return edit(slug, version, change)
 
@@ -531,8 +534,10 @@ def build_server(api: Api) -> FastMCP:
         picture into this graph's library first, as add_notes does. Taking a picture's line out of a
         note leaves the picture in the library (list_images); only the person can delete it, in the web app."""
         def change(doc: dict) -> tuple[dict, dict]:
+            given = [n.model_dump() for n in notes]
+            canvas.update_notes(doc, given)  # an edit that fails copies no picture in
             pasted, report = paste(slug, [n.text for n in notes if n.text])
-            given = [{**n.model_dump(), **({"text": pasted(n.text)} if n.text else {})} for n in notes]
+            given = [{**g, **({"text": pasted(g["text"])} if g["text"] else {})} for g in given]
             after, notices = canvas.update_notes(doc, given)
             return after, with_notices({"updated": [note.id for note in notes], **report}, notices)
         return edit(slug, version, change)

@@ -239,3 +239,55 @@ def test_a_picture_is_left_out_of_a_paste_as_the_web_app_leaves_it_out(tmp_path)
              f"bare {p} path", f"- ![a]({p})\n- keep", f"![a]({p})![b]({p})", f"![other](attachments/rag/{B}) {p}"]
     theirs = run_web_app(tmp_path, "out = given.map((t) => web.withoutImage(t, 'rag', " + json.dumps(A) + "));", texts)
     assert theirs == [images.without_image(t, "rag", A) for t in texts]
+
+
+# A picture on the web whose address happens to hold a library-like path: a web image, not a library one.
+WEB = "https://raw.githubusercontent.com/me/vault/main/attachments/{slug}/{file}"
+IN_URLS = [f"![board]({WEB.format(slug='other', file=B)})", f"![board]({WEB.format(slug='rag', file=A)})",
+           f"see {WEB.format(slug='rag', file=A)} here", f"[link](<{WEB.format(slug='other', file=A)}>)",
+           f"<{WEB.format(slug='rag', file=A)}>", f"x/attachments/rag/{A} and ../attachments/other/{B}"]
+
+
+def test_a_path_inside_a_web_address_is_no_library_path():
+    assert images.foreign_images(IN_URLS, "here") == {}
+    paths = {f"attachments/other/{B}": f"attachments/here/{B}", f"attachments/rag/{A}": f"attachments/here/{A}"}
+    for text in IN_URLS:
+        assert images.rewrite_images(text, paths) == text
+        assert images.without_image(text, "rag", A) == text
+        assert images.without_image(text, "other", B) == text
+    doc = {"nodes": [{"id": f"n{i}", "type": "text", "text": text} for i, text in enumerate(IN_URLS)]}
+    assert images.usage(doc, "rag") == {} and images.usage(doc, "other") == {}
+
+
+def test_a_path_is_a_library_path_as_a_link_target_or_on_its_own():
+    texts = [f"![a](attachments/rag/{A})", f"![a]( <attachments/rag/{A}> )", f"[a](attachments/rag/{A})",
+             f"attachments/rag/{A}", f"Path:\tattachments/rag/{A}", f"x\nattachments/rag/{A}", f"![a](./attachments/rag/{A})",
+             f"./attachments/rag/{A}"]
+    doc = {"nodes": [{"id": f"n{i}", "type": "text", "text": text} for i, text in enumerate(texts)]}
+    assert images.usage(doc, "rag") == {A: [f"n{i}" for i in range(len(texts))]}
+    assert images.foreign_images(texts, "here") == {"rag": [A]}
+    assert [images.rewrite_images(t, {f"attachments/rag/{A}": f"attachments/here/{A}"}) for t in texts] == \
+        [t.replace("attachments/rag/", "attachments/here/") for t in texts]
+
+
+def test_a_web_address_is_treated_as_the_web_app_treats_it(tmp_path):
+    p = f"attachments/rag/{A}"
+    texts = [*IN_URLS, f"![a](attachments/rag/{A}) {WEB.format(slug='rag', file=A)}", f"./attachments/other/{B}",
+             f"bare attachments/other/{B} and https://x.test/attachments/other/{B}",
+             f"{p} {p}", f"{p} ./{p},", f"x/{p}  {p},", f"{p}{p} {p}", f"({p}) <{p}>", f"see {WEB.format(slug='rag', file=A)} {p} end"]
+    paths = {f"attachments/other/{B}": f"attachments/here/{B}", f"attachments/rag/{A}": f"attachments/here/{A}"}
+    theirs = run_web_app(tmp_path, (
+        "const doc = { nodes: given.texts.map((text, i) => ({ id: `n${i}`, type: 'text', text, x: 0, y: 0, width: 1, height: 1 })) };\n"
+        "out = { foreign: web.foreignImages(given.texts.join('\\n'), 'here'),\n"
+        "  rewritten: given.texts.map((t) => web.rewriteImages(t, given.paths)),\n"
+        "  without: given.texts.map((t) => [web.withoutImage(t, 'rag', given.A), web.withoutImage(t, 'other', given.B)]),\n"
+        "  usage: Object.fromEntries([...web.usage(doc, 'rag')]), usageOther: Object.fromEntries([...web.usage(doc, 'other')]) };"),
+        {"texts": texts, "paths": paths, "A": A, "B": B})
+    doc = {"nodes": [{"id": f"n{i}", "type": "text", "text": text} for i, text in enumerate(texts)]}
+    assert theirs == {
+        "foreign": images.foreign_images(["\n".join(texts)], "here"),
+        "rewritten": [images.rewrite_images(t, paths) for t in texts],
+        "without": [[images.without_image(t, "rag", A), images.without_image(t, "other", B)] for t in texts],
+        "usage": images.usage(doc, "rag"), "usageOther": images.usage(doc, "other"),
+    }
+    assert theirs["foreign"] == {"rag": [A], "other": [B]} and set(theirs["usage"]) == {A}

@@ -53,3 +53,12 @@ def test_a_picture_of_a_graph_that_is_not_a_test_graphs_is_refused_in_any_argume
             guarded(tool, arguments)
     ours = {"slug": "mcp-test-1-copy", "version": 2, "notes": [{"text": "![p](attachments/mcp-test-1/img_0123456789abcdef.png)"}]}
     assert guarded("add_notes", ours) is ours
+
+
+def test_a_picture_on_its_own_line_is_found_and_one_inside_a_web_address_is_not():
+    for text in ("Title\nattachments/example/img_0123456789abcdef.png", "x\n![p](<attachments/example/img_0123456789abcdef.png>)"):
+        with pytest.raises(NotATestGraph, match="names a picture of 'example'"):
+            guarded("add_notes", {"slug": "mcp-test-1", "version": 2, "notes": [{"text": text}]})
+    web = {"slug": "mcp-test-1", "version": 2, "notes": [
+        {"text": "![p](https://raw.githubusercontent.com/me/vault/main/attachments/example/img_0123456789abcdef.png)"}]}
+    assert guarded("add_notes", web) is web

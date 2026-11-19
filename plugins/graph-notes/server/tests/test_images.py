@@ -13,7 +13,8 @@ import subprocess
 import pytest
 
 from graph_notes_mcp import images
-from pictures import GPS, HEIC, ORIENTATION, SCAN, SVG, XMP_GPS, gif, jpeg, png, png_chunk, segment, tiff, webp
+from pictures import (APP2_MPF, APP11_C2PA, C2PA, GIF_FRAME, GIF_LOOP, GPS, HEIC, MP4_WITH_LOCATION, ORIENTATION, SCAN, SCANS, SVG,
+                      XMP_GPS, XMP_MOTION_PHOTO, gif, gif_sub_blocks, jpeg, png, png_chunk, segment, tiff, webp, webp_chunk)
 from support import REPO
 
 A = "img_7f3a91c0e1b2d4f5.jpg"
@@ -99,13 +100,69 @@ def test_a_png_loses_exif_and_text_chunks_and_nothing_else():
     assert images.strip_metadata(dirty, "image/png") == clean
 
 
-def test_a_webp_loses_exif_and_xmp_and_their_flags_and_a_gif_is_unchanged():
+def test_a_webp_loses_exif_and_xmp_and_their_flags():
     assert images.strip_metadata(webp(9, 9, exif=tiff((GPS, 1)), xmp=XMP_GPS), "image/webp") == webp(9, 9)
-    assert images.strip_metadata(gif(), "image/gif") == gif()
+
+
+def test_a_multi_picture_jpeg_keeps_only_its_first_picture():
+    """The later pictures of a multi-picture file carry their own Exif (GPS among it), and its index goes too."""
+    first = jpeg(exif=tiff((ORIENTATION, 6), (GPS, 1)), extra=APP2_MPF, scan=SCANS)
+    second = jpeg(exif=tiff((GPS, 1)), xmp=XMP_GPS)
+    out = images.strip_metadata(first + second, "image/jpeg")
+    assert out == images.strip_metadata(first, "image/jpeg")
+    assert out.count(b"\xff\xd8") == 1 and b"MPF\x00" not in out and b"\x88\x25" not in out and b"GPS" not in out
+    assert out.endswith(SCANS)  # every scan, stuffed bytes and restarts included, as it was
+    assert images.jpeg_orientation(out) == 6
+
+
+def test_a_motion_photos_video_is_left_out():
+    out = images.strip_metadata(jpeg(xmp=XMP_MOTION_PHOTO) + MP4_WITH_LOCATION, "image/jpeg")
+    assert out == jpeg() and b"51.5073" not in out
+
+
+def test_a_jpeg_loses_its_c2pa_content_credentials_and_every_other_application_segment():
+    makers = segment(0xEC, b"Ducky\x00\x01") + segment(0xE2, b"FPXR\x00stuff") + segment(0xE0, b"JFXX\x00\x10thumb")
+    adobe = segment(0xEE, b"Adobe\x00\x64\x00\x00\x00\x00\x01")
+    out = images.strip_metadata(jpeg(extra=APP11_C2PA + makers + adobe, icc=b"p"), "image/jpeg")
+    assert out == jpeg(extra=adobe, icc=b"p")
+
+
+def with_stray_bytes(data: bytes) -> bytes:
+    """A jpeg() with bytes that are no marker before its first APP1 and before its frame header (a stuffed
+    0xff 0x00 among them), as some cameras leave after a segment: decoders skip them."""
+    exif_at, frame_at = data.index(b"\xff\xe1"), data.index(b"\xff\xc0")
+    return data[:exif_at] + b"\x00\x00" + data[exif_at:frame_at] + b"\x12\xff\x00\x34" + data[frame_at:]
+
+
+def test_bytes_between_a_jpegs_segments_that_are_no_marker_go_and_the_metadata_after_them_too():
+    original = jpeg(exif=tiff((ORIENTATION, 6), (GPS, 1)), xmp=XMP_GPS, extra=APP11_C2PA)
+    out = images.strip_metadata(with_stray_bytes(original), "image/jpeg")
+    assert out == images.strip_metadata(original, "image/jpeg")
+    assert b"\x88\x25" not in out and b"GPS" not in out and b"c2pa" not in out
+    assert images.jpeg_orientation(out) == 6
+
+
+def test_a_png_loses_its_c2pa_chunk_and_any_other_it_does_not_draw_with():
+    kept = png_chunk(b"gAMA", b"\0\0\xb1\x8f") + png_chunk(b"pHYs", b"\0\0\x0b\x13\0\0\x0b\x13\x01")
+    dirty = png(3, 2, extra=kept + png_chunk(b"caBX", C2PA) + png_chunk(b"iDOT", b"\0" * 28) + png_chunk(b"zxIf", b"x"))
+    assert images.strip_metadata(dirty + b"after the end", "image/png") == png(3, 2, extra=kept)
+
+
+def test_a_webp_loses_its_c2pa_chunk_and_anything_after_its_end():
+    dirty = webp(9, 9, exif=tiff((GPS, 1)), extra=webp_chunk(b"C2PA", C2PA)) + b"GPS 51.5073,-0.1277" + C2PA
+    assert images.strip_metadata(dirty, "image/webp") == webp(9, 9)
+
+
+def test_a_gif_loses_comments_xmp_and_anything_after_its_trailer_and_keeps_its_frames_and_looping():
+    comment = b"\x21\xfe" + gif_sub_blocks(b"Taken at 51.5073 N, 0.1277 W")
+    xmp = b"\x21\xff\x0bXMP DataXMP" + XMP_GPS + b"\x01" + bytes(range(255, -1, -1)) + b"\x00"
+    dirty = gif(blocks=GIF_LOOP + comment + GIF_FRAME + xmp + GIF_FRAME) + b"GPS 51.5073"
+    assert images.strip_metadata(dirty, "image/gif") == gif(blocks=GIF_LOOP + GIF_FRAME + GIF_FRAME)
 
 
 def test_a_clean_file_comes_back_the_same():
-    for data, kind in ((jpeg(), "image/jpeg"), (png(2, 2), "image/png"), (webp(3, 3), "image/webp")):
+    for data, kind in ((jpeg(), "image/jpeg"), (jpeg(scan=SCANS), "image/jpeg"), (png(2, 2), "image/png"),
+                       (webp(3, 3), "image/webp"), (gif(), "image/gif"), (gif(blocks=GIF_LOOP + GIF_FRAME), "image/gif")):
         assert images.strip_metadata(data, kind) == data
 
 
@@ -143,6 +200,16 @@ def test_the_same_bytes_as_the_web_apps_removal(tmp_path):
         "png-text": (png(4, 3, extra=png_chunk(b"tEXt", b"Comment\0hi") + png_chunk(b"eXIf", tiff((GPS, 1)))), "image/png"),
         "webp-exif-xmp": (webp(5, 7, exif=tiff((GPS, 1)), xmp=XMP_GPS), "image/webp"),
         "gif": (gif(), "image/gif"),
+        "jpeg-multi-picture": (jpeg(exif=tiff((ORIENTATION, 6)), extra=APP2_MPF, scan=SCANS) + jpeg(exif=tiff((GPS, 1))), "image/jpeg"),
+        "jpeg-motion-photo": (jpeg(xmp=XMP_MOTION_PHOTO) + MP4_WITH_LOCATION, "image/jpeg"),
+        "jpeg-app11-c2pa": (jpeg(extra=APP11_C2PA + segment(0xEE, b"Adobe\x00\x64"), icc=b"p"), "image/jpeg"),
+        "jpeg-truncated": (jpeg(exif=tiff((ORIENTATION, 3)))[:-30], "image/jpeg"),
+        "jpeg-stray-bytes": (with_stray_bytes(jpeg(exif=tiff((ORIENTATION, 6), (GPS, 1)), xmp=XMP_GPS, extra=APP11_C2PA)), "image/jpeg"),
+        "jpeg-stray-to-the-end": (jpeg()[:20] + b"\x00\x12\x34", "image/jpeg"),
+        "png-cabx": (png(4, 3, extra=png_chunk(b"caBX", C2PA) + png_chunk(b"pHYs", b"\0" * 9)) + b"tail", "image/png"),
+        "webp-c2pa-trailer": (webp(5, 7, extra=webp_chunk(b"C2PA", C2PA)) + b"tail", "image/webp"),
+        "gif-comment-xmp": (gif(blocks=GIF_LOOP + b"\x21\xfe\x02hi\x00" + GIF_FRAME + b"\x21\xff\x0bXMP DataXMP\x03abc\x00") + b"x", "image/gif"),
+        "gif-truncated": (gif(blocks=GIF_LOOP + GIF_FRAME)[:-9], "image/gif"),
     }
     theirs = run_web_app(tmp_path, (
         "out = {};\nfor (const [name, [b64, type]] of Object.entries(given)) "

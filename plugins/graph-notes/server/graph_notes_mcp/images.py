@@ -210,27 +210,34 @@ def _orientation_segment(orientation: int) -> bytes:
     return bytes([0xFF, 0xE1, length >> 8, length & 0xFF]) + payload
 
 
-def _jpeg_segments(b: bytes) -> tuple[list[tuple[int, bytes]], int]:
-    """``([(marker, segment)], start)``: a JPEG's segments before its image data, and where that data
-    starts."""
+def _jpeg_segments(b: bytes) -> list[tuple[int, bytes]]:
+    """``[(marker, segment)]``: a JPEG's segments before its first scan."""
     segments: list[tuple[int, bytes]] = []
     at = 2
-    while at + 4 <= len(b) and b[at] == 0xFF:
+    while at + 4 <= len(b):
+        if b[at] != 0xFF or b[at + 1] == 0x00:
+            at = b.find(b"\xff", at + 1)  # not a marker: skipped, as _strip_jpeg skips it
+            if at < 0:
+                break
+            continue
         marker = b[at + 1]
         if marker == 0xFF:
             at += 1
             continue
         if marker in (0xDA, 0xD9):  # start of scan (or the end): the rest is image data
             break
+        if marker == 0x01 or 0xD0 <= marker <= 0xD8:  # markers without a length
+            at += 2
+            continue
         end = at + 2 + ((b[at + 2] << 8) | b[at + 3])
         segments.append((marker, b[at:end]))
         at = end
-    return segments, at
+    return segments
 
 
 def jpeg_orientation(b: bytes) -> int | None:
     """The EXIF orientation (1..8) of a JPEG, from its first Exif segment that has one, or None."""
-    for marker, segment in _jpeg_segments(b)[0]:
+    for marker, segment in _jpeg_segments(b):
         if marker == 0xE1 and segment[4:8] == b"Exif":
             orientation = exif_orientation(segment[10:])
             if orientation:
@@ -238,29 +245,85 @@ def jpeg_orientation(b: bytes) -> int | None:
     return None
 
 
+# The application segments a JPEG decoder reads, by marker and signature: JFIF, the colour profile, and
+# Adobe's colour transform. Every other one (APP1 Exif and XMP, APP2 multi-picture index, APP11 content
+# credentials, APP13 IPTC, makers' own) is metadata.
+_JPEG_KEPT_APPS = {0xE0: b"JFIF\x00", 0xE2: b"ICC_PROFILE\x00", 0xEE: b"Adobe"}
+
+
 def _strip_jpeg(b: bytes) -> bytes:
-    """Drops APP1 (Exif, XMP), APP13 (IPTC) and comments, keeping an orientation-only Exif so photos stay
-    upright, and every other segment (the colour profile among them) and the image data as they are."""
-    segments, start = _jpeg_segments(b)
-    kept = [b[:2], *(segment for marker, segment in segments if marker not in (0xE1, 0xED, 0xFE))]
+    """The primary image only, from SOI to its EOI, so later pictures (a multi-picture file's) and
+    trailers (a motion photo's video) go. Of its segments, drops comments and every application segment
+    but JFIF, the colour profile and Adobe's, adding back an orientation-only Exif so photos stay upright;
+    the tables, frame and scans (the image data) stay as they are."""
+    kept = [b[:2]]
+    placed = False
+    at = 2
+    while at + 2 <= len(b):
+        if b[at] != 0xFF or b[at + 1] == 0x00:
+            at = b.find(b"\xff", at + 1)  # not a marker: skipped up to the next 0xff, as decoders skip it
+            if at < 0:
+                break
+            continue
+        marker = b[at + 1]
+        if marker == 0xFF:
+            at += 1  # fill
+            continue
+        if marker == 0xD9:
+            kept.append(b[at:at + 2])  # the primary image's end: what follows is not shown
+            break
+        if marker == 0x01 or 0xD0 <= marker <= 0xD8:
+            kept.append(b[at:at + 2])  # markers without a length
+            at += 2
+            continue
+        if at + 4 > len(b):
+            kept.append(b[at:])
+            break
+        end = at + 2 + ((b[at + 2] << 8) | b[at + 3])
+        is_app = 0xE0 <= marker <= 0xEF or marker == 0xFE
+        if not is_app or (marker in _JPEG_KEPT_APPS and b[at + 4:end].startswith(_JPEG_KEPT_APPS[marker])):
+            if len(kept) == 1 and marker == 0xE0:
+                placed = True  # the Exif goes after JFIF's APP0
+            kept.append(b[at:end])
+        at = end
+        if marker == 0xDA:
+            # The scan's entropy-coded data, up to the next marker that is not a restart (0xff 0x00 is a
+            # data byte; fill bytes, more 0xff, may come before a marker).
+            start = at
+            while True:
+                at = b.find(b"\xff", at)
+                after = at + 1
+                while 0 <= at and after < len(b) and b[after] == 0xFF:
+                    after += 1
+                if at < 0 or after >= len(b):
+                    at = len(b)
+                    break
+                if b[after] != 0x00 and not 0xD0 <= b[after] <= 0xD7:
+                    break
+                at = after + 1
+            kept.append(b[start:at])
     orientation = jpeg_orientation(b)
     if orientation and orientation != 1:
-        placed = any(marker == 0xE0 for marker, _ in segments)  # the Exif goes after JFIF's APP0
         kept.insert(2 if placed else 1, _orientation_segment(orientation))
-    return b"".join(kept) + b[start:]
+    return b"".join(kept)
 
 
-_PNG_DROPPED = {b"eXIf", b"tEXt", b"zTXt", b"iTXt", b"tIME"}
+# The ancillary PNG chunks a decoder reads: transparency, colour, pixel size, animation. The rest (eXIf,
+# text chunks where XMP lives, tIME, caBX content credentials, makers' own) are metadata.
+_PNG_KEPT = {b"tRNS", b"gAMA", b"cHRM", b"sRGB", b"iCCP", b"cICP", b"mDCV", b"cLLI", b"sBIT", b"bKGD", b"pHYs",
+             b"acTL", b"fcTL", b"fdAT"}
 
 
 def _strip_png(b: bytes) -> bytes:
-    """Drops the eXIf chunk and the text chunks (where XMP and other notes live)."""
+    """Keeps the critical chunks (header, palette, image data, end) and the ancillary chunks above, up
+    to IEND."""
     kept = [b[:8]]
     at = 8
     while at + 12 <= len(b):
         size, kind = _u32(b, at, False), b[at + 4:at + 8]
         end = at + 12 + size
-        if kind not in _PNG_DROPPED:
+        critical = not b[at + 4] & 0x20
+        if critical or kind in _PNG_KEPT:
             kept.append(b[at:end])
         at = end
         if kind == b"IEND":
@@ -268,33 +331,91 @@ def _strip_png(b: bytes) -> bytes:
     return b"".join(kept)
 
 
+# The WebP chunks a decoder reads; EXIF, XMP, C2PA and any others are metadata.
+_WEBP_KEPT = {b"VP8X", b"VP8 ", b"VP8L", b"ALPH", b"ANIM", b"ANMF", b"ICCP"}
+
+
 def _strip_webp(b: bytes) -> bytes:
-    """Drops the EXIF and XMP chunks, clearing their flags in VP8X and fixing the RIFF size."""
+    """Keeps the chunks above, within the RIFF's own size (so nothing after it), clearing the EXIF and
+    XMP flags in VP8X and fixing the RIFF size."""
     kept = []
+    limit = min(len(b), 8 + _u32(b, 4, True))
     at = 12
-    while at + 8 <= len(b):
+    while at + 8 <= limit:
         kind, size = b[at:at + 4], _u32(b, at + 4, True)
-        end = min(len(b), at + 8 + size + (size & 1))
+        end = min(limit, at + 8 + size + (size & 1))
         if kind == b"VP8X":
             chunk = bytearray(b[at:end])
             if len(chunk) > 8:
                 chunk[8] &= ~(0x08 | 0x04) & 0xFF  # EXIF and XMP present
             kept.append(bytes(chunk))
-        elif kind not in (b"EXIF", b"XMP "):
+        elif kind in _WEBP_KEPT:
             kept.append(b[at:end])
         at = end
     body = b"".join(kept)
     return b"RIFF" + (len(body) + 4).to_bytes(4, "little") + b[8:12] + body
 
 
+# The GIF application extensions a decoder reads: looping (two spellings) and the colour profile.
+_GIF_KEPT_APPS = (b"NETSCAPE2.0", b"ANIMEXTS1.0", b"ICCRGBG1012")
+
+
+def _after_sub_blocks(b: bytes, at: int) -> int:
+    """Where a run of GIF data sub-blocks starting at ``at`` ends (after its zero-length terminator)."""
+    while at < len(b):
+        size = b[at]
+        at += 1 + size
+        if size == 0:
+            break
+    return min(at, len(b))
+
+
+def _byte(b: bytes, i: int) -> int:
+    return b[i] if i < len(b) else 0
+
+
+def _strip_gif(b: bytes) -> bytes:
+    """Keeps the header, colour tables, frames, their graphic controls and plain text, and the extensions
+    above, up to the trailer; drops comments, other application extensions (XMP among them) and anything
+    after the trailer."""
+    at = 13
+    if _byte(b, 10) & 0x80:
+        at += 3 << ((b[10] & 0x07) + 1)  # global colour table
+    kept = [b[:at]]
+    while at < len(b):
+        start = at
+        if b[at] == 0x3B:
+            kept.append(b[at:at + 1])
+            break
+        if b[at] == 0x2C:
+            flags = _byte(b, at + 9)
+            at += 10
+            if flags & 0x80:
+                at += 3 << ((flags & 0x07) + 1)  # local colour table
+            at = _after_sub_blocks(b, at + 1)  # after the LZW code size, the image data
+            kept.append(b[start:at])
+        elif b[at] == 0x21:
+            label = _byte(b, at + 1)
+            at = _after_sub_blocks(b, at + 2)
+            app = label == 0xFF and _byte(b, start + 2) == 11 and b[start + 3:start + 14] in _GIF_KEPT_APPS
+            if label in (0xF9, 0x01) or app:
+                kept.append(b[start:at])
+        else:
+            break  # not a block a decoder reads: the rest goes
+    return b"".join(kept)
+
+
 def strip_metadata(data: bytes, content_type: str) -> bytes:
     """The same picture without location and other metadata, losslessly: no pixel is decoded or changed.
-    JPEG keeps only its orientation and colour profile; PNG loses eXIf and text chunks; WebP its EXIF and
-    XMP chunks; GIF is returned as it is."""
+    Each format keeps only what a decoder reads to draw it (and JPEG its orientation, as an Exif of that
+    alone): JPEG its primary image, PNG, WebP and GIF their image data, colour and animation; everything
+    else, and anything after the picture's end, goes."""
     if content_type == "image/jpeg":
         return _strip_jpeg(data)
     if content_type == "image/png":
         return _strip_png(data)
     if content_type == "image/webp":
         return _strip_webp(data)
+    if content_type == "image/gif":
+        return _strip_gif(data)
     return data

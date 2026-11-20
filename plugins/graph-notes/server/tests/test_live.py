@@ -44,6 +44,7 @@ async def live_run(report, pictures_dir: str) -> None:
                                env={"PATH": os.environ["PATH"], "HOME": os.environ["HOME"]})
     stamp = time.strftime("%Y%m%d-%H%M%S")
     slug, copy, pictured_copy = f"{PREFIX}{stamp}", f"{PREFIX}{stamp}-copy", f"{PREFIX}{stamp}-pictures"
+    routes = f"{PREFIX}{stamp}-workflows"
 
     async with Client(transport) as mcp:
         async def call(tool: str, **arguments):
@@ -222,6 +223,44 @@ async def live_run(report, pictures_dir: str) -> None:
             assert sorted(copied_list["images"][0]["notes"]) == sorted([second, board])
             report(f"copy_graph with a picture: {pictured_copy} has its own copy, and its notes show it")
 
+            await ok("create_graph", title="MCP live test workflows (safe to delete)", slug=routes)
+            names = ["P13", "P4", "L10", "P5", "P3", "L6", "L12", "P2", "L5", "S1", "L3"]
+            route = [("P13", "P4"), ("P13", "P5"), ("P13", "L10"), ("P4", "P3"), ("P4", "L6"), ("P3", "P2"), ("P3", "L5"),
+                     ("P3", "L12"), ("L12", "L3"), ("P2", "S1"), ("L6", "L5"), ("L5", "L3"), ("P5", "L3")]
+            notes = await ok("add_notes", slug=routes, version=1, notes=[
+                {"text": f"## {name} · a step", "key": name, **({"workflow_tags": ["draft"]} if name == "P13" else {})}
+                for name in names], links=[{"from_note": a, "to_note": b} for a, b in route])
+            card = {n["key"]: n["id"] for n in notes["added"]}
+            assert notes["added"][0]["workflow_tags"] == ["draft"]
+            made = await ok("add_workflows", slug=routes, version=2, workflows=[{
+                "name": "W1 · axes", "description": "What does PCA compute?", "start": card["P13"],
+                "steps": [{"from_note": card[a], "to_note": card[b]} for a, b in route]}])
+            w1 = made["added"][0]
+            assert made["version"] == 3 and (w1["cards"], w1["steps"], w1["follow_steps"]) == (11, 13, 5)
+            assert {c["id"] for c in w1["ends"]} == {card["L10"], card["S1"], card["L3"]}
+            listed = await ok("list_workflows", slug=routes)
+            assert [w["id"] for w in listed["workflows"]] == [w1["id"]] and "warnings" not in listed["workflows"][0]
+            read = await ok("read_workflow", slug=routes, workflow=w1["id"])
+            assert [{c["id"] for c in step["cards"]} for step in read["route"]] == [
+                {card[n] for n in level} for level in (["P13"], ["P4", "L10", "P5"], ["P3", "L6"], ["L12", "P2", "L5"], ["S1", "L3"])]
+            assert {"id": card["L3"], "title": "L3 · a step", "step": 5, "reached_later": True} in read["route"][1]["next"]
+            report("add_notes with workflow_tags, add_workflows, list_workflows, read_workflow: a W1-shaped route in 5 steps, "
+                   "one depth level each, P5 → L3 reached later")
+            changed = await ok("update_workflows", slug=routes, version=3, workflows=[
+                {"id": w1["id"], "name": "W1 · the axes", "remove_steps": [{"from_note": card["P5"], "to_note": card["L3"]}]}])
+            assert changed["version"] == 4 and changed["updated"][0]["steps"] == 12
+            p3_p2 = next(link["id"] for link in (await ok("read_graph", slug=routes))["links"]
+                         if (link["from_note"], link["to_note"]) == (card["P3"], card["P2"]))
+            unlinked = await ok("unlink_notes", slug=routes, version=4, link_ids=[p3_p2])
+            assert unlinked["notices"] == ["W1 · the axes lost the step P3 · a step → P2 · a step"]
+            pruned = (await ok("list_workflows", slug=routes))["workflows"][0]
+            assert pruned["steps"] == 11 and "can't be reached" in pruned["warnings"][0]
+            gone = await ok("remove_workflows", slug=routes, version=5, workflow_ids=[w1["id"]])
+            graph = await ok("read_graph", slug=routes)
+            assert gone["version"] == 6 and "workflows" not in graph and len(graph["links"]) == 12
+            assert next(n for n in graph["notes"] if n["id"] == card["P13"])["workflow_tags"] == ["draft"]
+            report("update_workflows, unlink_notes pruning its step with a notice, remove_workflows: cards and links stay")
+
             trashed = await ok("trash_graph", slug=slug)
             assert trashed["trashed_at"]
             assert slug in [g["slug"] for g in (await ok("list_trash"))["trash"]]
@@ -230,14 +269,14 @@ async def live_run(report, pictures_dir: str) -> None:
             assert "trashed_at" not in back and slug in [g["slug"] for g in (await ok("list_graphs"))["mine"]]
             report("trash_graph, list_trash, restore_from_trash: there and back")
         finally:
-            for test_graph in (slug, copy, pictured_copy):  # leave the test graphs in the trash, whatever happened above
+            for test_graph in (slug, copy, pictured_copy, routes):  # leave the test graphs in the trash, whatever happened above
                 await call("trash_graph", slug=test_graph)
 
         trash = [g["slug"] for g in (await ok("list_trash"))["trash"]]
-        assert slug in trash and copy in trash and pictured_copy in trash
+        assert slug in trash and copy in trash and pictured_copy in trash and routes in trash
         after = others(await ok("list_graphs"), await ok("list_trash"))
         assert after == before, "a graph that is not this test's changed"
-        report(f"clean up: {slug}, {copy} and {pictured_copy} are in the trash; "
+        report(f"clean up: {slug}, {copy}, {pictured_copy} and {routes} are in the trash; "
                f"the {len(after)} other graphs are exactly as before")
 
 

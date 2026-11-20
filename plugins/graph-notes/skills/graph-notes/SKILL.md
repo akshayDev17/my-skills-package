@@ -1,6 +1,6 @@
 ---
 name: graph-notes
-description: Use when the person asks to look at, create, add to, reorganise, restyle or fix one of their graph-notes graphs (knowledge graphs drawn as Obsidian canvases in the graph-notes app), to box or group parts of one, to colour, move or resize its cards, to put a picture in a note, to undo a change, or to turn notes, a document or a conversation into a graph, through the graph-notes MCP tools (list_graphs, read_graph, add_notes, add_group_boxes and the rest).
+description: Use when the person asks to look at, create, add to, reorganise, restyle or fix one of their graph-notes graphs (knowledge graphs drawn as Obsidian canvases in the graph-notes app), to box or group parts of one, to colour, move or resize its cards, to put a picture in a note, to build, explain or follow a workflow (a named route through a graph), to undo a change, or to turn notes, a document or a conversation into a graph, through the graph-notes MCP tools (list_graphs, read_graph, add_notes, add_group_boxes and the rest).
 ---
 
 # graph-notes: reading and editing graphs well
@@ -24,10 +24,11 @@ writes exactly what the web app writes.
 | Part | On the canvas | What you see and send |
 |---|---|---|
 | **Graph** | one canvas | `slug` (its permanent address, never changes), `title`, `version`, `private`/`public`, `url` |
-| **Note** | a text card | `id` (stable), `text` (Markdown), `clusters`; and when set: `color`, `border`, `shape`, `text_align` |
+| **Note** | a text card | `id` (stable), `text` (Markdown), `clusters`; and when set: `color`, `border`, `shape`, `text_align`, `workflow_tags` |
 | **Link** | an edge | `id`, `from_note` → `to_note`, optional `label`, `direction`: `forward` (default), `backward`, `both`, `none`; and when set: `color`, `line`, `path`, `from_side`, `to_side` |
 | **Cluster** | `#tags` on a card's last line, or a labelled group box | a name, lowercase with `-`; a note can be in several |
 | **Group box** | a group node | `id`, `label`, the notes it `contains`, the `boxes` inside it, `collapsed`, `color`; its label names a cluster of the cards inside it |
+| **Workflow** | a named route along links, kept in the canvas beside the cards | `id`, `name`, `description` (its question), `start`, `steps`, `ends`, `after`; `read_graph` lists them |
 | **Other cards** | web-page and file cards | `kind`, `url` or `file`; make web-page cards (`add_notes` with `url`), edit a page's `url` or a file card's `file` (`update_notes`); link, style, move and remove them |
 
 Cluster names are stored as a final line of `#tags`, as in Obsidian. Pass them in
@@ -90,10 +91,44 @@ library holds the picture.
 - **Removing** a picture's line, or its note, leaves the picture in the library. No tool
   deletes a picture: that is for the person, in the web app.
 
+## Workflows: routes through a graph
+
+A **workflow** is a named route along links that are already in the graph: a `start` card,
+its **steps** (each step is a link, walked along its arrow; a link with arrows at both ends or
+none may be walked either way) and the workflows it comes **after**. Its **ends** are the cards
+with no next step. People follow it in the web app with Next and Previous, like directions.
+
+- **Make the links first, then the workflow.** A step must be a link already in the graph
+  (`add_notes` with links, or `link_notes`). `add_workflows` names each step by its link's id
+  or by the two notes it joins (`from_note`, `to_note`), and each step must be reached from
+  `start` through the other steps.
+- **Never encode a workflow in clusters** (no `w1-…-next-p4` tags). Use `add_workflows`.
+  Clusters are for themes.
+- **Name it for the question it answers**, and put the question in its `description`. Use
+  `after` for the order between workflows, not the text of a menu card.
+- **Read a route with `read_workflow`** to explain or check one. It walks the route as Follow
+  does: one step is one depth level, so a card comes one step after the longest way to it,
+  after every card that leads into it. At a split it follows every branch (there is no "choose
+  one"). Each step gives its cards in reading order, the cards they came from and the next
+  cards; a next card that a longer way also reaches is marked `reached_later`, with the step it
+  is reached at. Quote its `directions` text when you explain a route.
+- **Warnings are the person's to fix.** `list_workflows` and `read_workflow` report a step that
+  can't be reached, a missing start card, or a link whose arrow now points the other way: say
+  what, don't fix it unasked. A route that loops back to an earlier card is not supported yet:
+  it is reported, and gets no step order.
+- `update_workflows` changes one in place: name, question, start, `after`, its place in the
+  list, and steps added (`add_steps`) or taken out (`remove_steps`), never sent whole.
+  `remove_workflows` removes one and takes it out of other workflows' `after`; its cards and
+  links stay. `unlink_notes` and `remove_notes` take out the steps that used the removed links,
+  and their `notices` say which: tell the person.
+- **Workflow tags are the person's own** (`workflow_tags` on a card, a field beside
+  `clusters`). Set them only when asked (`add_notes`, `update_notes`, full list), and never
+  treat them as clusters or workflows.
+
 The server's own `about_graphs` tool returns its guide to this model. Call it if anything
 here seems to disagree with what the tools do; the server is the authority.
 
-## The workflow
+## Working on a graph: find, read, change, report
 
 1. **Find the graph**: `list_graphs` returns the person's graphs (`mine`) and other people's
    public graphs (`public_from_others`, which you can read and copy but not change). Use
@@ -105,8 +140,8 @@ here seems to disagree with what the tools do; the server is the authority.
 3. **Make the change in as few calls as possible.** Each call that changes notes or links saves
    one new version, and the history is what the person browses later. Put related changes in
    one call. `add_notes`, `update_notes`, `remove_notes`, `link_notes`, `unlink_notes`,
-   `update_links`, `style_notes`, `move_notes`, `add_group_boxes`, `update_group_boxes` and
-   `remove_group_boxes` all take lists.
+   `update_links`, `style_notes`, `move_notes`, the three group-box tools and the three
+   workflow-editing tools all take lists.
 4. **Box the parts**: when the graph has parts (the stages of a pipeline, say), finish with one
    `add_group_boxes` call with a box per part.
 5. **Report back**: say what changed (notes added, links, clusters, boxes, notes that moved)
@@ -207,6 +242,9 @@ saves no new version.
 - **Removing content they wrote.** `remove_notes` also removes every link attached to those
   notes. The old version stays in the history, but confirm before you remove notes you did not
   add in this conversation.
+- **Removing a workflow, or taking steps out of one.** `remove_workflows` and
+  `update_workflows` with `remove_steps` remove content the person made. Ask first;
+  `restore_version` undoes either.
 - **Visibility.** `set_visibility` to `public` lets anyone view the graph's current version.
   Change it only when the person asks.
 - **The trash.** `trash_graph` moves a graph to the trash. `list_trash` and

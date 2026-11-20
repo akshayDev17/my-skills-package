@@ -266,4 +266,18 @@ def tour(app: App) -> list:
     do("copy_graph", slug="pictures", title="Pictures copy")
     do("download_for_obsidian", folder=app.downloads.name)
     do("download_for_obsidian", folder=f"{app.downloads.name}/no-such-folder")
+    # workflows: made along links, listed, followed, changed, pruned by an unlink, removed, and a refused step
+    do("create_graph", title="Routes")
+    route = do("add_notes", slug="routes", version=1, notes=[{"text": "From", "key": "a", "workflow_tags": ["draft"]},
+                                                              {"text": "To", "key": "b"}, {"text": "On", "key": "c"}],
+               links=[{"from_note": "a", "to_note": "b"}, {"from_note": "b", "to_note": "c"}])
+    a, b, c = (note["id"] for note in route["added"])
+    made = do("add_workflows", slug="routes", version=2, workflows=[
+        {"name": "Through", "start": a, "steps": [{"from_note": a, "to_note": b}, {"from_note": b, "to_note": c}]}])
+    do("list_workflows", slug="routes")
+    do("read_workflow", slug="routes", workflow=made["added"][0]["id"])
+    do("update_workflows", slug="routes", version=3, workflows=[{"id": made["added"][0]["id"], "name": "Through, renamed"}])
+    do("unlink_notes", slug="routes", version=4, link_ids=[route["links_added"][1]["id"]])
+    do("add_workflows", slug="routes", version=5, workflows=[{"name": "Back", "start": b, "steps": [{"from_note": b, "to_note": a}]}])
+    do("remove_workflows", slug="routes", version=5, workflow_ids=[made["added"][0]["id"]])
     return results

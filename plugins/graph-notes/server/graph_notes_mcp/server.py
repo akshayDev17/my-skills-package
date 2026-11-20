@@ -39,6 +39,7 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 from . import canvas, client, images
+from . import workflows as flows
 from .client import Api, ApiError
 from .guide import GUIDE, INSTRUCTIONS
 from .session import Session, SignInError
@@ -63,6 +64,12 @@ Version = Annotated[int, Field(description=(
     "previous change. If the graph has changed since, nothing is saved and you are shown its current content."))]
 
 
+WORKFLOW_TAGS = (
+    "Workflow tags: the person's own labels for their workflow work (e.g. ['draft']), a field of their own beside "
+    "clusters. They are never clusters or #tags, and nothing reads them to make or change workflows. Set them only "
+    "when the person asks.")
+
+
 class NewNote(BaseModel):
     text: str | None = Field(default=None, description="The note's Markdown text. Leave out only for a web-page card (url).")
     url: str | None = Field(default=None, description=(
@@ -76,6 +83,7 @@ class NewNote(BaseModel):
     near: str | None = Field(default=None, description=(
         "The id of an existing note this one relates to; it is placed beside it. Without it, the note goes "
         "beside the notes it is linked to, or that share one of its clusters."))
+    workflow_tags: list[str] = Field(default_factory=list, description=WORKFLOW_TAGS)
 
 
 class NoteChange(BaseModel):
@@ -87,6 +95,9 @@ class NoteChange(BaseModel):
     clusters: list[str] | None = Field(default=None, description=(
         "The full list of clusters the note should be in (an empty list removes it from all); "
         "leave out to keep its clusters."))
+    workflow_tags: list[str] | None = Field(default=None, description=(
+        f"The card's full list of workflow tags (an empty list removes them all); leave out to keep them. "
+        f"{WORKFLOW_TAGS}"))
 
 
 COLOR = (
@@ -174,6 +185,45 @@ class LinkOfNewNotes(NewLink):
     to_note: str = Field(description="Where the link points: the `key` of a note in this call, or an existing note's id.")
 
 
+class Step(BaseModel):
+    """One step of a workflow: an existing link, walked along its arrow."""
+    link: str | None = Field(default=None, description=(
+        "The link's id, as read_graph lists it in links. Or leave out and name the step by from_note and to_note."))
+    from_note: str | None = Field(default=None, description=(
+        "The id of the card the step goes from. With link, needed only for a link with arrows at both ends or none, "
+        "which may be walked either way."))
+    to_note: str | None = Field(default=None, description="The id of the card the step goes to.")
+
+
+class NewWorkflow(BaseModel):
+    name: str = Field(description="The workflow's name, e.g. 'W1 · axes'; name it for the question it answers.")
+    description: str | None = Field(default=None, description="The question it answers, e.g. 'What does PCA compute?'.")
+    start: str = Field(description="The id of the card it starts at.")
+    steps: list[Step] = Field(default_factory=list, description=(
+        "Its steps, each an existing link walked along its arrow, and each reached from start through the steps "
+        "before it (in this list or in any order): make the links first, with add_notes or link_notes."))
+    after: list[str] = Field(default_factory=list, description=(
+        "The workflows it comes after (prerequisites): ids of this graph's workflows, or keys of others in this call."))
+    key: str | None = Field(default=None, description=(
+        "A short name of your choosing for this workflow, e.g. 'w1', so that another workflow's `after` in the "
+        "same call can refer to it before it has an id."))
+
+
+class WorkflowChange(BaseModel):
+    id: str = Field(description="The id of the workflow to change, as list_workflows shows it.")
+    name: str | None = Field(default=None, description="Its new name; leave out to keep it.")
+    description: str | None = Field(default=None, description="Its new question; '' removes it. Leave out to keep it.")
+    start: str | None = Field(default=None, description="The id of its new start card; leave out to keep it.")
+    remove_steps: list[Step] = Field(default_factory=list, description=(
+        "Steps to take out: each by its link id, or by from_note and to_note. Done before add_steps."))
+    add_steps: list[Step] = Field(default_factory=list, description=(
+        "Steps to add, each an existing link walked along its arrow and reached from the start card."))
+    after: list[str] | None = Field(default=None, description=(
+        "The full new list of workflows it comes after (ids; an empty list: none). Leave out to keep it."))
+    move_to: int | None = Field(default=None, ge=1, description=(
+        "Its new place in the graph's list of workflows: 1 is first. Leave out to keep its place."))
+
+
 def slug_for(title: str) -> str:
     """The slug the web app gives a new graph with this title (frontend/lib/api.ts)."""
     plain = "".join(c for c in unicodedata.normalize("NFKD", title) if not "̀" <= c <= "ͯ")
@@ -196,6 +246,13 @@ def summary(app_url: str, row: dict) -> dict:
     if row.get("deleted_at"):
         shown["trashed_at"] = row["deleted_at"]
     return shown
+
+
+def contents(doc: dict, layout: bool = False) -> dict:
+    """What ``read_graph`` shows of a canvas: its notes, links, clusters and boxes, and (when it has
+    any) its workflows, each as list_workflows shows it."""
+    listed = flows.listed(doc)
+    return {**canvas.plain(doc, layout), **({"workflows": listed} if listed else {})}
 
 
 def save_new_file(folder: Path, name: str, data: bytes) -> Path:
@@ -264,7 +321,7 @@ def build_server(api: Api) -> FastMCP:
         return client.read_graph(api, slug)
 
     def shown(graph: dict) -> dict:
-        return {**summary(api.app_url, graph), **canvas.plain(graph["canvas"])}
+        return {**summary(api.app_url, graph), **contents(graph["canvas"])}
 
     def changed(sent: int, now: dict) -> ToolError:
         """What a change made from an outdated version answers with: the graph as it is ``now``."""
@@ -293,9 +350,11 @@ def build_server(api: Api) -> FastMCP:
         return graph
 
     def edit(slug: str, version: int, change: Callable[[dict], tuple[dict, dict]]) -> dict:
-        """Applies ``change`` (canvas -> (canvas, what to report)) to version ``version`` of my graph and saves it."""
+        """Applies ``change`` (canvas -> (canvas, what to report)) to version ``version`` of my graph and saves it,
+        labelled in History by the report's ``note`` when it has one."""
         after, report = change(editable(slug, version)["canvas"])
-        return {**saved(slug, version, lambda: client.save_graph(api, slug, version, canvas=after)), **report}
+        return {**saved(slug, version, lambda: client.save_graph(api, slug, version, canvas=after,
+                                                                 note=report.get("note"))), **report}
 
     def copy_in(slug: str, wanted: dict[str, list[str]]) -> tuple[dict[str, str], list[tuple[str, str]]]:
         """Copies ``wanted`` (``{source slug: [files]}``) into my graph ``slug``'s library, as the web app's
@@ -323,7 +382,7 @@ def build_server(api: Api) -> FastMCP:
 
     @tool(READS)
     def about_graphs() -> str:
-        """Explains what a graph is (notes, links, clusters, group boxes, versions, the trash, public and
+        """Explains what a graph is (notes, links, clusters, group boxes, workflows, versions, the trash, public and
         private) and how to use these tools. Read it once before working with graphs."""
         return GUIDE
 
@@ -344,16 +403,17 @@ def build_server(api: Api) -> FastMCP:
             "True to also get where each note, card and group box is on the canvas and its size (x, y, width, "
             "height, in canvas pixels), which you need only to move or resize things with move_notes."))] = False,
     ) -> dict:
-        """Returns what a graph contains: its notes (id, text, clusters), the links between them, its
-        clusters, its group boxes (id, label, the notes and boxes each holds, whether it starts collapsed)
-        and its current version number, with how each note, link and box looks wherever that is not the
+        """Returns what a graph contains: its notes (id, text, clusters, and workflow_tags when a note has
+        any), the links between them, its clusters, its group boxes (id, label, the notes and boxes each
+        holds, whether it starts collapsed), its workflows (each as list_workflows shows it) and its
+        current version number, with how each note, link and box looks wherever that is not the
         app's default. Call this before changing a graph."""
         if at_version is None:
             graph = read(slug)
-            return {**summary(api.app_url, graph), **canvas.plain(graph["canvas"], layout)}
+            return {**summary(api.app_url, graph), **contents(graph["canvas"], layout)}
         old = client.read_version(api, slug, at_version)
         return {"slug": old["slug"], "title": old["title"], "version": old["version"]["n"],
-                "saved_at": old["version"]["saved_at"], "is_current": False, **canvas.plain(old["canvas"], layout)}
+                "saved_at": old["version"]["saved_at"], "is_current": False, **contents(old["canvas"], layout)}
 
     @tool(READS)
     def list_history(
@@ -545,10 +605,12 @@ def build_server(api: Api) -> FastMCP:
     @tool(REPLACES)
     def remove_notes(slug: Slug, version: Version, note_ids: Annotated[list[str], Field(min_length=1)]) -> dict:
         """Removes notes (or other cards) from a graph, and the links attached to them, in one saved
-        version. The previous version stays in the history."""
+        version. The workflow steps that used those links go too, and a workflow that started at a removed
+        card is left without a start; the result's notices say which. The previous version stays in the history."""
         def change(doc: dict) -> tuple[dict, dict]:
             after, links = canvas.remove_cards(doc, note_ids)
-            return after, {"removed": note_ids, "links_removed": links}
+            after, notices = flows.pruned(doc, after, links, note_ids)
+            return after, with_notices({"removed": note_ids, "links_removed": links}, notices)
         return edit(slug, version, change)
 
     @tool(ADDS)
@@ -562,8 +624,12 @@ def build_server(api: Api) -> FastMCP:
 
     @tool(REPLACES)
     def unlink_notes(slug: Slug, version: Version, link_ids: Annotated[list[str], Field(min_length=1)]) -> dict:
-        """Removes links (by link id, as read_graph shows them) in one saved version. The notes stay."""
-        return edit(slug, version, lambda doc: (canvas.remove_links(doc, link_ids), {"removed": link_ids}))
+        """Removes links (by link id, as read_graph shows them) in one saved version. The notes stay. The
+        workflow steps that used those links go too, and the result's notices say which."""
+        def change(doc: dict) -> tuple[dict, dict]:
+            after, notices = flows.pruned(doc, canvas.remove_links(doc, link_ids), link_ids)
+            return after, with_notices({"removed": link_ids}, notices)
+        return edit(slug, version, change)
 
     @tool(REPLACES)
     def update_links(slug: Slug, version: Version, links: Annotated[list[LinkChange], Field(min_length=1)]) -> dict:
@@ -635,7 +701,67 @@ def build_server(api: Api) -> FastMCP:
         notes inside stay where they are, with their links; they leave only the boxes' clusters."""
         def change(doc: dict) -> tuple[dict, dict]:
             after, links = canvas.remove_group_boxes(doc, box_ids)
-            return after, {"removed": box_ids, **({"links_removed": links} if links else {})}
+            after, notices = flows.pruned(doc, after, links, box_ids)
+            return after, with_notices({"removed": box_ids, **({"links_removed": links} if links else {})}, notices)
+        return edit(slug, version, change)
+
+    # ── workflows ──────────────────────────────────────────────────────────
+
+    @tool(READS)
+    def list_workflows(slug: Slug) -> dict:
+        """Lists a graph's workflows in their order: each one's id, name, question (description), start
+        card, how many cards and steps it has and how many steps Follow takes, its end cards, the workflows
+        it comes after, and any warnings (a step that can't be reached, a missing start). Also for other
+        people's public graphs, read-only."""
+        graph = read(slug)
+        return {"slug": slug, "version": graph["version"]["n"], "workflows": flows.listed(graph["canvas"])}
+
+    @tool(READS)
+    def read_workflow(
+        slug: Slug,
+        workflow: Annotated[str, Field(description="The workflow's id, as list_workflows shows it.")],
+    ) -> dict:
+        """Returns a workflow's route as the web app's Follow walks it: one step per depth level of the route
+        (a card comes after every card leading into it; at a split, every branch), each with its cards (in
+        reading order, top to bottom then left to right), the cards it came from, the cards it leads to (a
+        card reached by a longer way too is marked reached_later, with the step it is reached at) and the
+        link ids in and out. Also its end cards, the workflows that come after it, its warnings, and all of
+        it as plain directions text to quote. Use it to explain or check a workflow."""
+        graph = read(slug)
+        return {"slug": slug, "version": graph["version"]["n"], **flows.directions(graph["canvas"], workflow)}
+
+    @tool(ADDS)
+    def add_workflows(slug: Slug, version: Version, workflows: Annotated[list[NewWorkflow], Field(
+            min_length=1, description="The workflows to add, at the end of the graph's list.")]) -> dict:
+        """Adds workflows to a graph, all in one saved version: each a named route from a start card along
+        existing links (each step walked along its link's arrow), with the workflows it comes after. Make
+        the links first. A step names its link by id, or by the two notes it joins. Returns each new
+        workflow's id (with your key), its cards, steps and ends. Never encode a workflow in clusters."""
+        def change(doc: dict) -> tuple[dict, dict]:
+            after, added = flows.add(doc, [w.model_dump() for w in workflows])
+            return after, {"added": added, "note": flows.note([w["name"] for w in added], "added")}
+        return edit(slug, version, change)
+
+    @tool(REPLACES)
+    def update_workflows(slug: Slug, version: Version, workflows: Annotated[list[WorkflowChange], Field(
+            min_length=1, description="The changes, each naming its workflow's id.")]) -> dict:
+        """Changes workflows in place, all in one saved version: their name, question, start card, the
+        workflows they come after (the full new list), their place in the list, and their steps, which are
+        added or taken out (never sent whole). What you leave out stays as it is. Taking steps out removes
+        content the person made: do it only when they ask."""
+        def change(doc: dict) -> tuple[dict, dict]:
+            after, updated = flows.update(doc, [w.model_dump() for w in workflows])
+            return after, {"updated": updated, "note": flows.note([w["name"] for w in updated], "updated")}
+        return edit(slug, version, change)
+
+    @tool(REPLACES)
+    def remove_workflows(slug: Slug, version: Version, workflow_ids: Annotated[list[str], Field(min_length=1)]) -> dict:
+        """Removes workflows (by id) in one saved version, and takes them out of other workflows' 'comes
+        after' lists. Their cards and links stay. Only when the person asks; restore_version undoes it."""
+        def change(doc: dict) -> tuple[dict, dict]:
+            after, notices = flows.remove(doc, workflow_ids)
+            names = [flows.find(doc, i).get("name") for i in dict.fromkeys(workflow_ids)]
+            return after, with_notices({"removed": workflow_ids, "note": flows.note(names, "removed")}, notices)
         return edit(slug, version, change)
 
     # ── images ─────────────────────────────────────────────────────────────

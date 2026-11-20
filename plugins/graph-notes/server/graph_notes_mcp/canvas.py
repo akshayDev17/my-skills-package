@@ -128,6 +128,34 @@ def _text(node: dict) -> str:
     return node["text"] if isinstance(node.get("text"), str) else ""
 
 
+# ── workflow tags ──────────────────────────────────────────────────────────
+#
+# A card's ``workflowTags`` are the person's own labels for their workflow work, kept apart
+# from clusters in both directions: never a ``#tag`` in the text (so never a cluster, nor in
+# Obsidian's tag pane), and never read or written by workflows. Any card but a group box
+# may have them; names are normalized as cluster names are.
+
+def workflow_tags(node: dict) -> list[str]:
+    raw = node.get("workflowTags")
+    return [tag for tag in raw if isinstance(tag, str)] if isinstance(raw, list) else []
+
+
+def _shown_tags(node: dict) -> dict:
+    """``workflow_tags`` as a read shows them: only when the card has any."""
+    return {"workflow_tags": workflow_tags(node)} if workflow_tags(node) else {}
+
+
+def _tags_patch(node: dict, names: list[str] | None) -> dict:
+    """The patch that sets ``node``'s workflow tags to ``names`` (None keeps them; an empty
+    list removes the key), or ``{}`` when they are already those."""
+    if names is None:
+        return {}
+    if node.get("type") == "group":
+        raise EditError(f"'{node['id']}' is a group box: only notes and other cards have workflow tags")
+    tags = clean_tags(names)
+    return {} if tags == workflow_tags(node) and (tags or "workflowTags" not in node) else {"workflowTags": tags or None}
+
+
 # ── appearance ─────────────────────────────────────────────────────────────
 #
 # The web app's Inspector (frontend/components/Inspector.tsx) writes each choice as
@@ -238,14 +266,14 @@ def plain(canvas: dict, layout: bool = False) -> dict:
     notes, others, groups = [], [], []
     for n in nodes:
         if n.get("type") == "text":
-            notes.append({"id": n["id"], "text": split_tags(_text(n))[0], "clusters": sorted(of[n["id"]]), **appearance(n),
-                          **place(n)})
+            notes.append({"id": n["id"], "text": split_tags(_text(n))[0], "clusters": sorted(of[n["id"]]),
+                          **_shown_tags(n), **appearance(n), **place(n)})
         elif n.get("type") == "group":
             groups.append({**_box_report(nodes, n), **place(n)})
         else:
             what = {"link": ("web page", "url"), "file": ("file", "file")}.get(n.get("type"), ("card", "text"))
             others.append({"id": n["id"], "kind": what[0], what[1]: n.get(what[1]), "clusters": sorted(of[n["id"]]),
-                           **appearance(n), **place(n)})
+                           **_shown_tags(n), **appearance(n), **place(n)})
     links = [_plain_link(e) for e in canvas.get("edges") or []]
     clusters = [
         {"name": name,
@@ -452,8 +480,9 @@ def flow_layout(sizes: dict[str, tuple[int, int]], edges: list[tuple[str, str]])
 # ── edits ──────────────────────────────────────────────────────────────────
 
 def new_id(canvas: dict, random: Callable[[], str] = lambda: secrets.token_hex(8)) -> str:
-    """A fresh id in Obsidian's style: 16 hex digits, used by no node or edge."""
-    taken = {item["id"] for key in ("nodes", "edges") for item in canvas.get(key) or []}
+    """A fresh id in Obsidian's style: 16 hex digits, used by no node, edge or workflow."""
+    taken = {item.get("id") for key in ("nodes", "edges", "workflows") for item in canvas.get(key) or []
+             if isinstance(item, dict)}
     while True:
         candidate = random()
         if candidate not in taken:
@@ -525,15 +554,16 @@ def _url(url: object) -> str:
 
 
 def add_notes(canvas: dict, notes: list[dict], links: list[dict] = ()) -> tuple[dict, list[dict], list[dict]]:
-    """``canvas`` with a new text card per ``{text, clusters?, near?, key?}`` (a web-page
-    card per ``{url, near?, key?}``) and a new edge per ``{from_note, to_note, label?,
+    """``canvas`` with a new text card per ``{text, clusters?, workflow_tags?, near?, key?}``
+    (a web-page card per ``{url, workflow_tags?, near?, key?}``) and a new edge per ``{from_note, to_note, label?,
     direction?, color?, line?, path?, from_side?, to_side?}`` (as ``_edge`` writes it),
     whose ends are a new note's ``key`` or the id of a card already there; and the plain
     form of what was added.
 
     A web-page card is the node the web app's "+ Link" makes and its URL field fills in:
     ``{type: "link", url, width: 400, height: 240, id, x, y}``, in that order. It has no
-    text, so no tag line: it joins a cluster only by being in a group box.
+    text, so no tag line: it joins a cluster only by being in a group box. Workflow tags,
+    when given, go last on either card, as ``workflowTags``.
 
     Where the new cards go:
     - new notes linked to each other are laid out together (``flow_layout``) as one
@@ -557,7 +587,7 @@ def add_notes(canvas: dict, notes: list[dict], links: list[dict] = ()) -> tuple[
                                                                   else "a card of this graph already has that id"))
     made = []  # (node without a place yet, its note)
     for note in notes:
-        node_id = new_id({"nodes": nodes + [node for node, _ in made], "edges": canvas.get("edges")})
+        node_id = new_id({**canvas, "nodes": nodes + [node for node, _ in made]})
         if note.get("url") is not None:
             if note.get("text") is not None or note.get("clusters"):
                 raise EditError("a web-page card has a url and nothing else: no text, and no clusters (it has no "
@@ -579,7 +609,7 @@ def add_notes(canvas: dict, notes: list[dict], links: list[dict] = ()) -> tuple[
         ends = []
         for end in ("from_note", "to_note"):
             ends.append(by_key.get(link[end]) or _find(nodes, link[end], end)["id"])
-        edge = _edge(new_id({"nodes": nodes + [node for node, _ in made], "edges": edges}), link, *ends)
+        edge = _edge(new_id({**canvas, "nodes": nodes + [node for node, _ in made], "edges": edges}), link, *ends)
         edges.append(edge)
         added_edges.append(edge)
 
@@ -616,29 +646,35 @@ def add_notes(canvas: dict, notes: list[dict], links: list[dict] = ()) -> tuple[
     if loose:
         put(loose, _grid({m: (node_of[m]["width"], node_of[m]["height"]) for m in loose}), [], set())
 
-    placed = [n for n in canvas.get("nodes") or []] + [
+    placed = [n for n in canvas.get("nodes") or []] + [_patched(
         {"id": node["id"], "type": "text", "text": node["text"], "x": node["x"], "y": node["y"],
          "width": node["width"], "height": node["height"]} if node["type"] == "text" else
         {"type": "link", "url": node["url"], "width": node["width"], "height": node["height"], "id": node["id"],
-         "x": node["x"], "y": node["y"]} for node, _ in made]
+         "x": node["x"], "y": node["y"]}, _tags_patch(node, note.get("workflow_tags"))) for node, note in made]
     after = {**canvas, "nodes": placed, **({"edges": edges} if added_edges else {})}
     added = [{"id": node["id"], **({"key": note["key"]} if note.get("key") else {}),
               **({"text": split_tags(node["text"])[0], "clusters": split_tags(node["text"])[1]} if node["type"] == "text"
-                 else {"kind": "web page", "url": node["url"]})} for node, note in made]
+                 else {"kind": "web page", "url": node["url"]}), **_shown_tags(placed_node)}
+             for (node, note), placed_node in zip(made, placed[len(canvas.get("nodes") or []):])]
     return after, added, [_plain_link(e) for e in added_edges]
 
 
 def update_notes(canvas: dict, changes: list[dict]) -> tuple[dict, list[str]]:
-    """``canvas`` with each ``{id, text?, clusters?, url?, file?}`` applied to its card,
+    """``canvas`` with each ``{id, text?, clusters?, workflow_tags?, url?, file?}`` applied to its card,
     and a notice for each cluster a note keeps because it comes from a group box (which
     only the box no longer holding the card can change: update_group_boxes, or moving
     the card in the web app). ``clusters`` replaces the note's tags; ``text`` its body;
     ``url`` a web-page card's address and ``file`` a file card's path in the Obsidian
-    vault, each changed in place as the web app's URL and File fields change them."""
+    vault, each changed in place as the web app's URL and File fields change them;
+    ``workflow_tags`` the card's whole list of workflow tags (any card but a group box),
+    which never touches its text or clusters."""
     nodes = canvas.get("nodes") or []
     replaced: dict[str, dict] = {}
     for change in changes:
         node = replaced.get(change["id"]) or _find(nodes, change["id"])
+        tag_patch = _tags_patch(node, change.get("workflow_tags"))
+        if tag_patch:
+            node = replaced[node["id"]] = _patched(node, tag_patch)
         kind = node.get("type")
         field = {"link": "url", "file": "file"}.get(kind)
         wrong = [k for k in ("text", "clusters", "url", "file")
@@ -1104,7 +1140,7 @@ def add_group_boxes(canvas: dict, boxes: list[dict]) -> tuple[dict, list[dict], 
     made, keys, grew = [], {}, set()
     for spec in boxes:
         label = _box_label(spec.get("label"))
-        box_id = new_id({"nodes": nodes, "edges": edges})
+        box_id = new_id({**canvas, "nodes": nodes, "edges": edges})
         key = spec.get("key")
         if key and (key in keys or any(n["id"] == key for n in nodes)):
             raise EditError(f"key '{key}' must be unique: another new box or a card of this graph has it")

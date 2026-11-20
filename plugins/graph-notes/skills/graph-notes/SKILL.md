@@ -111,11 +111,14 @@ with no next step. People follow it in the web app with Next and Previous, like 
   after every card that leads into it. At a split it follows every branch (there is no "choose
   one"). Each step gives its cards in reading order, the cards they came from and the next
   cards; a next card that a longer way also reaches is marked `reached_later`, with the step it
-  is reached at. Quote its `directions` text when you explain a route.
+  is reached at. Quote its `directions` text when you explain a route. One exception: a step
+  whose link's arrow was turned round after the step was made is still walked here, with a
+  warning, while Follow leaves the route out from that step on.
 - **Warnings are the person's to fix.** `list_workflows` and `read_workflow` report a step that
   can't be reached, a missing start card, or a link whose arrow now points the other way: say
-  what, don't fix it unasked. A route that loops back to an earlier card is not supported yet:
-  it is reported, and gets no step order.
+  what, don't fix it unasked. For a turned arrow, say the web app's route stops at that step
+  until they turn the arrow back or take the step out. A route that loops back to an earlier
+  card is not supported yet: it is reported, and gets no step order.
 - `update_workflows` changes one in place: name, question, start, `after`, its place in the
   list, and steps added (`add_steps`) or taken out (`remove_steps`), never sent whole.
   `remove_workflows` removes one and takes it out of other workflows' `after`; its cards and

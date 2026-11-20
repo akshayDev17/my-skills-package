@@ -122,8 +122,9 @@ with no next step. People follow it in the web app with Next and Previous, like 
 - `update_workflows` changes one in place: name, question, start, `after`, its place in the
   list, and steps added (`add_steps`) or taken out (`remove_steps`), never sent whole.
   `remove_workflows` removes one and takes it out of other workflows' `after`; its cards and
-  links stay. `unlink_notes` and `remove_notes` take out the steps that used the removed links,
-  and their `notices` say which: tell the person.
+  links stay. `unlink_notes`, `remove_notes` and `remove_group_boxes` take out the steps that
+  used the removed links (a workflow whose start card is removed is left without one), and
+  their `notices` say which: tell the person.
 - **Workflow tags are the person's own** (`workflow_tags` on a card, a field beside
   `clusters`). Set them only when asked (`add_notes`, `update_notes`, full list), and never
   treat them as clusters or workflows.

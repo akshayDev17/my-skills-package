@@ -11,7 +11,10 @@ links and clusters, kept as an Obsidian canvas. The plugin bundles two things:
   link line styles, paths and sides; move and resize notes and boxes; draw, nest, rename, refit,
   collapse and remove group boxes; list a graph's image library and attach a picture from a
   file on this computer to a note (`list_images`, `attach_image`; no tool deletes a picture or
-  downloads one from the web); browse history and undo or redo by restoring a version; make
+  downloads one from the web); list, read, add, change and remove workflows, named routes along
+  a graph's links that people follow step by step in the web app (`list_workflows`,
+  `read_workflow`, `add_workflows`, `update_workflows`, `remove_workflows`), and set a card's
+  workflow tags; browse history and undo or redo by restoring a version; make
   a graph public or private; download every graph for Obsidian; and move graphs to the trash and
   back. Every edit the web app's editor can make has a tool. No tool deletes a graph forever.
   The model works with notes, links and boxes, and the server places new cards on the canvas
@@ -21,7 +24,7 @@ links and clusters, kept as an Obsidian canvas. The plugin bundles two things:
 - **A skill** (`skills/graph-notes/SKILL.md`) that teaches the model what a graph is (an
   Obsidian canvas: cards, edges, tag clusters, group boxes) and how to edit one well through
   those tools: how to group a graph's parts in titled, collapsible, nestable boxes, style and
-  move things, put pictures in notes, and undo a change.
+  move things, put pictures in notes, build and explain workflows, and undo a change.
 
 The server's code is bundled in the plugin, so you need no access to the graph-notes repo and
 no clone. Works in Claude Code only.
@@ -82,14 +85,14 @@ the notes in the `reading-list` graph". The tools appear as
 `server/` is a copy of the private graph-notes repo's `mcp-server/` directory, which is where the
 server is developed. The copy is never edited here.
 
-- **Copied from:** graph-notes commit `eb3c201c43547fb06d061b9a8dc6f0be1b092333`
-  (graph-notes PR 39, which added the picture tools `list_images` and `attach_image`, copies
-  other graphs' pictures in through `add_notes`, `update_notes` and `copy_graph`, and puts each
-  graph's pictures in the Obsidian download at `attachments/<slug>/`; and PR 42, after which
-  location and other metadata are removed from every part of an uploaded picture; and PR 44,
-  after which a picture path inside a web URL is left alone, and a picture is copied in only
-  once the edit that names it is known to be valid; and PR 45, after which an HDR photo keeps
-  its gain map, with the gain map's own metadata removed too).
+- **Copied from:** graph-notes commit `2d955452f16faf9e5e9a1e257444ecdd409c1dec`
+  (graph-notes PR 47, which added the workflow tools `list_workflows`, `read_workflow`,
+  `add_workflows`, `update_workflows` and `remove_workflows`, lists workflows in `read_graph`,
+  adds `workflow_tags` to `add_notes` and `update_notes`, and makes `unlink_notes` and
+  `remove_notes` take out the workflow steps that used the removed links; PR 48, the web app's
+  side of workflows, changed nothing in `mcp-server/`. Before those: PR 39's picture tools
+  `list_images` and `attach_image`, and PRs 42, 44 and 45 on picture metadata, picture paths
+  in web URLs and HDR gain maps).
 - `SERVER_SOURCE` records that commit and a sha256 for every file in `server/`. CI
   (`scripts/check-path-plugins.mjs`) fails if `server/` differs from it in any way: a file
   changed, added or removed by hand. It also fails if this README names a different commit.

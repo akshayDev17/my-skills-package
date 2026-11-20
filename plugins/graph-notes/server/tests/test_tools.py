@@ -20,6 +20,7 @@ TOOLS = {
     "add_notes", "update_notes", "remove_notes", "link_notes", "unlink_notes", "update_links", "style_notes",
     "add_group_boxes", "update_group_boxes", "remove_group_boxes", "move_notes", "download_for_obsidian",
     "list_images", "attach_image",
+    "list_workflows", "read_workflow", "add_workflows", "update_workflows", "remove_workflows",
 }
 
 

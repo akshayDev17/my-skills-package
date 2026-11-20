@@ -213,9 +213,11 @@ def create_graph(api: Api, slug: str, title: str) -> dict:
     return call(api, "POST", "/graphs", {"slug": checked_slug(slug), "title": title})
 
 
-def save_graph(api: Api, slug: str, base: int, *, canvas: dict | None = None, title: str | None = None) -> dict:
-    """Saves over version ``base`` only: the app answers 409 when the graph has moved on."""
-    change = {key: value for key, value in (("canvas", canvas), ("title", title)) if value is not None}
+def save_graph(api: Api, slug: str, base: int, *, canvas: dict | None = None, title: str | None = None,
+               note: str | None = None) -> dict:
+    """Saves over version ``base`` only: the app answers 409 when the graph has moved on. ``note``
+    is the short label History shows for the new version."""
+    change = {key: value for key, value in (("canvas", canvas), ("title", title), ("note", note)) if value is not None}
     return call(api, "PUT", f"/graphs/{checked_slug(slug)}", {"base": base, **change})
 
 

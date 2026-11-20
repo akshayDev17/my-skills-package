@@ -66,6 +66,39 @@ refitting a group box, which moves notes only where the box needs it, and says w
   clusters of its own (a group box around one puts it in a cluster). File cards cannot be
   made here, as in the web app: they come from Obsidian.
 
+## Workflows: routes through a graph
+
+A **workflow** is a named route along links that are already in the graph: a `start`
+card, its **steps** (each step is a link, walked along its arrow; a link with arrows at
+both ends or none may be walked either way) and the workflows it comes **after**
+(prerequisites). Its **ends** are the cards with no next step. People follow a workflow
+in the web app with Next and Previous, like directions; each step there is one depth level
+of the route (a card comes after every card leading into it), and at a split it follows
+every branch.
+
+- Make the links first (`add_notes` with links, or `link_notes`), then the workflow
+  (`add_workflows`). A step names its link by id, or by the two notes it joins
+  (`from_note`, `to_note`), and must be reached from `start` through the other steps.
+- **Never encode a workflow in clusters** (no `w1-...-next-...` tags): clusters are for
+  themes. Name a workflow for the question it answers, put the question in its
+  `description`, and use `after` for the order between workflows.
+- `list_workflows` lists them, with any warnings; `read_workflow` gives one's route step by
+  step, as Follow walks it, with plain directions text to quote. `read_graph` lists them too.
+  Warnings (a step that can't be reached, a missing start card, a link whose arrow now
+  points the other way) are the person's to fix: say what, don't fix it unasked. A route
+  that loops back to a card before it is not supported yet, and gets no step order.
+- `update_workflows` changes one in place (name, question, start, `after`, its place in the
+  list, steps added or taken out); `remove_workflows` removes one, and takes it out of other
+  workflows' `after`; its cards and links stay. Removing a workflow or taking steps out of
+  one removes content the person made: ask first.
+- `unlink_notes` and `remove_notes` also take out the steps that used the removed links (a
+  workflow whose start card is removed is left without a start), and their `notices` say
+  which.
+- **Workflow tags** (`workflow_tags`, on notes and other cards) are the person's own labels
+  for their workflow work, a field of their own beside clusters. They are never clusters or
+  `#tags`, and nothing reads them to make or change workflows. Set them (`add_notes`,
+  `update_notes`, full list) only when the person asks.
+
 ## Pictures and the image library
 
 Each graph has an **image library**: the pictures uploaded into it, kept in the app's
@@ -144,8 +177,8 @@ something (one colour per kind of note, say); then follow what is there.
   overwritten.
 - Each tool call that changes notes or links saves one version, so put related changes
   in one call: `add_notes` (notes and their links), `update_notes`, `remove_notes`,
-  `link_notes`, `unlink_notes`, `update_links`, `style_notes`, `move_notes` and the three
-  group-box tools all take a list.
+  `link_notes`, `unlink_notes`, `update_links`, `style_notes`, `move_notes`, the three
+  group-box tools and the three workflow tools all take a list.
 - `trash_graph` moves a graph to the **trash**; `list_trash` shows the trash and
   `restore_from_trash` brings a graph back with its whole history, for as long as the
   app keeps it there. No tool here deletes a graph forever: that is for the person to
@@ -155,8 +188,8 @@ something (one colour per kind of note, say); then follow what is there.
 
 The web app's Undo and Redo (⌘Z, ⇧⌘Z) live only in the browser tab where the edits were
 made: each tab keeps its own list of steps, which no other tab and no tool here can see.
-Here a change to a graph's content or title (notes, cards, links, boxes, their looks, a
-rename) is already a saved version, so its undo and redo are `restore_version`: to undo it,
+Here a change to a graph's content or title (notes, cards, links, boxes, workflows, their
+looks, a rename) is already a saved version, so its undo and redo are `restore_version`: to undo it,
 restore the version before it (the `version` you made it from); to redo it, restore the
 version the undo replaced. A restore saves a new version, so nothing is lost, and
 `list_history` shows what each version was; restoring a version whose content and title are

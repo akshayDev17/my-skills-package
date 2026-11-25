@@ -19,7 +19,7 @@ bin, so it runs with or without an agent. Works with Claude Code, Codex, Gemini 
 
 ```sh
 portfolio-app bootstrap --repo <owner/name> --path /<prefix> [--public | --public-path <path>…]
-                        [--d1 <name>] [--clone <dir>] [--apply]
+                        [--d1 <name>] [--clone <dir>] [--wrangler <path>] [--apply]
 ```
 
 A prefix may have several segments (`/work/election-atlas`). Without `--public`, three steps,
@@ -32,10 +32,19 @@ each one only filling in what is missing:
    `<team>.cloudflareaccess.com/cdn-cgi/access/login/…`, and stops before touching D1 or GitHub
    if it never does.
 2. **D1.** Find the database by name or create it, then write its id into the clone's
-   `backend/wrangler.jsonc`, replacing the `REPLACE_AFTER_d1_create` placeholder (comments are
-   preserved). The commit is left to the repo's normal delivery path. `--clone` defaults to the
-   current directory, and its `origin` must be `--repo`. `--d1` defaults to the `database_name`
-   of the entry that holds the placeholder.
+   `backend/wrangler.jsonc`, replacing the placeholder `REPLACE_AFTER_d1_create` or
+   `00000000-0000-0000-0000-000000000000` held by a `database_id` (comments are preserved, and
+   so is an all-zero id in any other field, such as a KV namespace's `id`). The edit is a
+   one-line diff. The commit is left to the repo's normal delivery path. `--clone` defaults to
+   the current directory, and its `origin` must be `--repo`. `--d1` defaults to the
+   `database_name` of the entry that holds the placeholder. Entries holding either placeholder
+   for one database are replaced together; entries naming several databases are a conflict.
+   `--wrangler <path>` names the Worker config when it is not `backend/wrangler.jsonc`, say
+   `--wrangler shell/wrangler.jsonc`: a path inside `--clone` (an absolute one, or one that
+   leaves the clone, is a usage error, exit 2). It replaces the default for the whole run:
+   the D1 step's plan and apply, the "already carries the database_id" check, the write, every
+   message that names the file, and, with `--public`, the reads of `r2_buckets` and the Worker
+   `name`, which come from the same file. Without it nothing changes.
 3. **GitHub.** Create the repo's `production` environment and set `CLOUDFLARE_API_TOKEN` (the
    narrow deploy token) and `CLOUDFLARE_ACCOUNT_ID` through `gh`. Secret values go to `gh` over
    stdin, never in argv.
@@ -299,6 +308,15 @@ not `/graph/_next`.
 
 ### Plan, apply, exit codes
 
+**AUD tags.** Each Access app a run creates or finds (the sign-in app and, for a mixed app,
+the `<repo name> (public)` Bypass app) is printed with its audience tag, the value the app's
+Worker checks Access tokens against. Plan lines for apps that exist end in `(AUD <tag>)`; an
+app the plan would create has no tag yet and none is shown. After `--apply`'s Access check the
+run prints `AUD tag of Access app "<name>" (created|found): <tag>` for each, so a re-run on an
+already bootstrapped app prints them again. The tag is read from the `aud` field of the app
+record Cloudflare returns on create and list; if an answer has none the line says so rather
+than showing a value. The tag is not a secret; no token or secret value is ever printed.
+
 Without `--apply`, the command prints the plan and changes nothing: planning makes Cloudflare
 `GET`s (with the setup token read from the keychain), `gh` reads, `git remote get-url`, and an
 *existence* check on the deploy-token keychain entry only. Exit codes: `0`
@@ -516,6 +534,11 @@ security add-generic-password -s portfolio-app -a cloudflare-deploy-token -w
 
 ### Access API: reusable policies, `destinations` vs `self_hosted_domains`
 
+- **AUD tag:** an application record carries a read-only `aud` string ("Audience tag", at most
+  64 characters) in the create, list and get answers. Checked against Cloudflare's published
+  OpenAPI schema (`cloudflare/api-schemas`, `openapi.json`, read 2026-11-25): the
+  `GET /accounts/{account_id}/access/apps` item schema has `aud`. The tests' Cloudflare stand-in
+  mints one on create, as the API does; no live account call has confirmed it.
 - **Reusable policies** are account-level: `GET`/`POST /accounts/{account_id}/access/policies`
   ("Lists Access reusable policies"). A policy's required fields are `name`, `decision` and
   `include`; an email rule is `{"email": {"email": "…"}}`. List items carry `reusable` and

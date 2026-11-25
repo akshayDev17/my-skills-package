@@ -146,7 +146,8 @@ export function fakeFetch(state) {
     }
     if (path === `${base}/access/apps` && method === "GET") return list(state.apps);
     if (path === `${base}/access/apps` && method === "POST") {
-      const app = { id: `app-${state.apps.length + 1}`, ...JSON.parse(init.body) };
+      // Cloudflare mints the read-only `aud` tag when it creates an app.
+      const app = { id: `app-${state.apps.length + 1}`, aud: `aud-minted-${state.apps.length + 1}`, ...JSON.parse(init.body) };
       state.apps.push(app);
       return jsonResponse(200, { success: true, result: app });
     }

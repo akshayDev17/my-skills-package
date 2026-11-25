@@ -68,7 +68,7 @@ import {
   withoutDestination,
   workerExists,
 } from "./cloudflare.mjs";
-import { D1_PLACEHOLDER, d1Target, parseJsonc, r2Target, replacePlaceholder } from "./wrangler-config.mjs";
+import { DEFAULT_WRANGLER, d1Target, parseJsonc, r2Target, replacePlaceholder, resolveWranglerPath } from "./wrangler-config.mjs";
 import {
   DEPLOY_TOKEN_ACCOUNT,
   GITHUB_ENVIRONMENT,
@@ -85,6 +85,10 @@ import {
 } from "./local.mjs";
 
 const sameSet = (a, b) => a.length === b.length && a.every((x) => b.includes(x));
+
+/** An Access app's audience (AUD) tag, as the API's app record carries it in `aud`. Not a secret. */
+const audOf = (app) => (typeof app?.aud === "string" && app.aud !== "" ? app.aud : null);
+const audNote = (app) => (audOf(app) ? ` (AUD ${audOf(app)})` : "");
 
 /** Setup-token permissions beyond Access and D1, named as the Cloudflare dashboard names them. */
 export const SCOPES = {
@@ -161,7 +165,7 @@ async function planAccess({ cf }, { repo, prefix, config, publicPaths = [] }) {
     const app = exact[0];
     const held = appUris(app);
     const missing = uris.filter((uri) => !held.includes(uri));
-    actions.push({ step: "access", kind: "app", state: "ok", name: app.name, summary: `Access app "${app.name}" guards ${held.join(" + ")}` });
+    actions.push({ step: "access", kind: "app", state: "ok", name: app.name, aud: audOf(app), summary: `Access app "${app.name}" guards ${held.join(" + ")}${audNote(app)}` });
     const refusal = missing.length > 0 ? narrowingRefusal(app, policies) : null;
     if (refusal) {
       actions.push({ step: "access", kind: "app-narrowing", state: "conflict",
@@ -231,14 +235,14 @@ async function planBypass({ cf }, { repo, prefix, config, publicPaths }) {
     const shared = held.filter((uri) => uris.includes(uri));
     if (a === exact) {
       appActions.push(everyoneOnly(a)
-        ? app("ok", `Bypass app "${a.name}" lets anyone reach ${uris.join(" + ")}`, { name: a.name })
+        ? app("ok", `Bypass app "${a.name}" lets anyone reach ${uris.join(" + ")}${audNote(a)}`, { name: a.name, aud: audOf(a) })
         : app("conflict", `Access app "${a.name}" holds exactly the public paths but is not Bypass for Everyone; ${NEVER_MOVE}`));
     } else if (a.name === name && !exact && held.length > 0 && held.every((uri) => uris.includes(uri))) {
       const missing = uris.filter((uri) => !held.includes(uri));
       const refusal = everyoneOnly(a) ? putRefusal(a) : "it is not Bypass for Everyone";
       appActions.push(refusal
         ? app("conflict", `Access app "${a.name}" holds [${held.join(", ")}], some of the public paths, but ${refusal}, so the tool cannot add ${missing.join(" + ")}; add them by hand`)
-        : app("ok", `Bypass app "${a.name}" lets anyone reach ${held.join(" + ")}`, { name: a.name }));
+        : app("ok", `Bypass app "${a.name}" lets anyone reach ${held.join(" + ")}${audNote(a)}`, { name: a.name, aud: audOf(a) }));
       if (!refusal) {
         appActions.push({ step: "access", kind: "bypass-app-add", state: "create", name: a.name, appId: a.id, held, uris: missing,
           summary: `add public destination(s) ${missing.join(" + ")} to Bypass app "${a.name}" (anyone, no sign-in)` });
@@ -328,22 +332,32 @@ async function planPublicAccess({ cf, fetch }, { prefix, config }) {
   return actions;
 }
 
-/** The clone's backend/wrangler.jsonc, parsed — or the reason it cannot be used. Reads only. */
-function readClone({ run }, { repo, cloneDir }) {
-  const wranglerPath = join(cloneDir, "backend", "wrangler.jsonc");
+/**
+ * The clone's Worker config (`backend/wrangler.jsonc`, or the `--wrangler` path), parsed —
+ * or the reason it cannot be used. Reads only. `wranglerFile` is the clone-relative path as
+ * the user wrote it, for messages.
+ */
+function readClone({ run }, { repo, cloneDir, wrangler }) {
+  const wranglerFile = wrangler ?? DEFAULT_WRANGLER;
+  let wranglerPath;
+  try {
+    wranglerPath = resolveWranglerPath(cloneDir, wranglerFile);
+  } catch (err) {
+    return { wranglerPath: join(cloneDir, wranglerFile), wranglerFile, problem: err.message };
+  }
   const cloned = cloneRepo(run, cloneDir);
   if (cloned?.toLowerCase() !== repo.toLowerCase()) {
-    return { wranglerPath, problem: `${cloneDir} is a clone of ${cloned ?? "nothing GitHub knows"}, not ${repo}; pass --clone <path to a clone of ${repo}>` };
+    return { wranglerPath, wranglerFile, problem: `${cloneDir} is a clone of ${cloned ?? "nothing GitHub knows"}, not ${repo}; pass --clone <path to a clone of ${repo}>` };
   }
-  if (!existsSync(wranglerPath)) return { wranglerPath, problem: `${wranglerPath} does not exist` };
+  if (!existsSync(wranglerPath)) return { wranglerPath, wranglerFile, problem: `${wranglerPath} does not exist` };
   try {
-    return { wranglerPath, wrangler: parseJsonc(readFileSync(wranglerPath, "utf8")) };
+    return { wranglerPath, wranglerFile, wrangler: parseJsonc(readFileSync(wranglerPath, "utf8")) };
   } catch (err) {
-    return { wranglerPath, problem: `${wranglerPath}: ${err.message}` };
+    return { wranglerPath, wranglerFile, problem: `${wranglerPath}: ${err.message}` };
   }
 }
 
-const CLONE_PROBLEM = "needs the clone's backend/wrangler.jsonc — see the D1 conflict above";
+const cloneProblem = (clone) => `needs the clone's ${clone.wranglerFile} — see the D1 conflict above`;
 
 async function planD1({ cf }, { d1Flag }, clone) {
   const { wranglerPath } = clone;
@@ -354,12 +368,13 @@ async function planD1({ cf }, { d1Flag }, clone) {
   if (target.state === "conflict") return conflict(`${wranglerPath}: ${target.reason}`);
   if (target.state === "none") return [{ step: "d1", kind: "d1", state: "info", summary: "no d1_databases binding — nothing to do" }];
   if (target.state === "present") {
-    return [{ step: "d1", kind: "d1", state: "ok", summary: `wrangler.jsonc already carries the database_id for ${target.name}` }];
+    const file = clone.wranglerFile === DEFAULT_WRANGLER ? "wrangler.jsonc" : clone.wranglerFile;
+    return [{ step: "d1", kind: "d1", state: "ok", summary: `${file} already carries the database_id for ${target.name}` }];
   }
 
   const existing = await findD1(cf, target.name);
   const configAction = { step: "d1", kind: "d1-config", state: "create", path: wranglerPath, databaseId: existing?.uuid ?? null,
-    summary: `write database_id into ${wranglerPath} (replaces ${D1_PLACEHOLDER}); commit it through the normal delivery path` };
+    summary: `write database_id into ${wranglerPath} (replaces ${target.placeholders.join(" and ")}); commit it through the normal delivery path` };
   if (existing) {
     return [
       { step: "d1", kind: "d1-database", state: "ok", databaseId: existing.uuid, summary: `D1 database "${target.name}" exists (${existing.uuid})` },
@@ -375,7 +390,7 @@ async function planD1({ cf }, { d1Flag }, clone) {
 /** Public apps only: the single bucket the clone's `r2_buckets` names. */
 async function planR2({ cf }, clone) {
   const action = (state, summary, extra = {}) => ({ step: "r2", kind: "r2-bucket", state, summary, ...extra });
-  if (clone.problem) return [action("info", CLONE_PROBLEM)];
+  if (clone.problem) return [action("info", cloneProblem(clone))];
 
   const target = r2Target(clone.wrangler);
   if (target.state === "conflict") return [action("conflict", `${clone.wranglerPath}: ${target.reason}`)];
@@ -400,7 +415,7 @@ async function planR2({ cf }, clone) {
  */
 async function planRoutes({ cf }, { prefix, config }, clone) {
   const action = (state, summary, extra = {}) => ({ step: "route", kind: "route", state, summary, ...extra });
-  if (clone.problem) return [action("info", CLONE_PROBLEM)];
+  if (clone.problem) return [action("info", cloneProblem(clone))];
   const script = clone.wrangler.name;
   if (typeof script !== "string" || script === "") {
     return [action("conflict", `${clone.wranglerPath} has no "name"; the routes need the Worker's name`)];
@@ -627,6 +642,9 @@ export async function applyBootstrap({ cf, run, fetch, sleep, log }, actions, { 
   let policyId = actions.find((a) => a.kind === "policy")?.policyId ?? null;
   let bypassPolicyId = actions.find((a) => a.kind === "bypass-policy")?.policyId ?? null;
   let databaseId = actions.find((a) => a.kind === "d1-database" || a.kind === "d1-config")?.databaseId ?? null;
+  // Every Access app the run created or found, for the AUD lines: [{ name, aud, created }].
+  const accessApps = actions.filter((a) => (a.kind === "app" || a.kind === "bypass-app") && a.state === "ok" && a.name)
+    .map((a) => ({ name: a.name, aud: a.aud ?? null, created: false }));
 
   if (!isPublic) {
     const slash = `${config.domain}${prefix}/`;
@@ -660,7 +678,8 @@ export async function applyBootstrap({ cf, run, fetch, sleep, log }, actions, { 
         policyId = (await createReusablePolicy(cf, { name: action.name, decision: "allow", include })).id;
         log(`  + created reusable policy "${action.name}"`);
       } else if (action.kind === "app") {
-        await createSelfHostedApp(cf, { name: action.name, uris: action.uris, policyId });
+        const created = await createSelfHostedApp(cf, { name: action.name, uris: action.uris, policyId });
+        accessApps.push({ name: action.name, aud: audOf(created), created: true });
         log(`  + created Access app "${action.name}"`);
       } else if (action.kind === "app-narrowing") {
         await putAddedDestinations(cf, action, await readPlannedApp(cf, action));
@@ -673,6 +692,7 @@ export async function applyBootstrap({ cf, run, fetch, sleep, log }, actions, { 
           if (!addsSlash) throw err;
           throw new Error(`creating Bypass app "${action.name}" failed: ${err.message}. The app may exist all the same, holding ${slash}, and without its id this run cannot take that out again; check for it in the Zero Trust dashboard now`);
         });
+        accessApps.push({ name: action.name, aud: audOf(app), created: true });
         if (addsSlash) slashApps.push({ appId: app.id, name: action.name });
         log(`  + created Bypass app "${action.name}"`);
       } else if (action.kind === "bypass-app-add") {
@@ -699,6 +719,11 @@ export async function applyBootstrap({ cf, run, fetch, sleep, log }, actions, { 
     log(publicPaths.length > 0
       ? `  ✓ ${prefix} redirects to ${config.team}.cloudflareaccess.com, and its ${publicPaths.length} public path(s) answer signed out`
       : `  ✓ ${prefix} redirects to ${config.team}.cloudflareaccess.com`);
+    // The app's Worker checks Access tokens against this tag; it is not a secret.
+    for (const app of accessApps) {
+      log(app.aud ? `  AUD tag of Access app "${app.name}" (${app.created ? "created" : "found"}): ${app.aud}`
+        : `  AUD tag of Access app "${app.name}" (${app.created ? "created" : "found"}): not in Cloudflare's answer; read it from the app in the Zero Trust dashboard`);
+    }
   }
 
   const creates = (step) => actions.filter((a) => a.step === step && a.state === "create");

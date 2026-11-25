@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // portfolio-app — set up a new sub-app of the site, and check that it is behind Access.
 //
-//   portfolio-app bootstrap --repo <owner/name> --path /<prefix> [--public | --public-path <path>…] [--d1 <name>] [--clone <dir>] [--apply]
+//   portfolio-app bootstrap --repo <owner/name> --path /<prefix> [--public | --public-path <path>…] [--d1 <name>] [--clone <dir>] [--wrangler <path>] [--apply]
 //   portfolio-app verify --path /<prefix> [--public-path <path>…] [--domain <host>] [--team <team>]
 //
 // This file only wires the real world (fetch, child processes, the filesystem) into the
@@ -15,15 +15,22 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { parseArgs } from "node:util";
 import { normalizePrefix, normalizePublicPath } from "./lib/prefix.mjs";
 import { verifyPath } from "./lib/verify.mjs";
+import { resolveWranglerPath } from "./lib/wrangler-config.mjs";
 import { applyBootstrap, formatPlan, planBootstrap } from "./lib/bootstrap.mjs";
 import { SETUP_TOKEN_ACCOUNT, defaultConfigPath, isInsideGitWorkTree, keychainRead, parseConfig } from "./lib/local.mjs";
 
 const USAGE = `usage:
   portfolio-app bootstrap --repo <owner/name> --path /<prefix> [--public | --public-path <path>…]
-                          [--d1 <name>] [--clone <dir>] [--config <file>] [--apply]
+                          [--d1 <name>] [--clone <dir>] [--wrangler <path>] [--config <file>] [--apply]
       Plans (default) or applies (--apply) the setup steps for a sub-app:
       a Cloudflare Access app for the path, its D1 database id in backend/wrangler.jsonc,
-      and the GitHub "production" environment secrets.
+      and the GitHub "production" environment secrets. Each Access app it creates or finds
+      is printed with its AUD tag (not a secret; the app's Worker checks Access tokens
+      against it).
+      --wrangler <path> names the Worker config when it is not backend/wrangler.jsonc:
+      a path inside --clone (say shell/wrangler.jsonc). It replaces that file everywhere
+      the tool reads or writes it. The D1 step replaces REPLACE_AFTER_d1_create or
+      00000000-0000-0000-0000-000000000000 in a database_id.
       --public makes the path reachable by anyone: no Access step; instead the R2 bucket
       named in wrangler.jsonc and the one Worker route /<prefix>* (it replaces the Worker's
       old /<prefix> + /<prefix>/* routes, which miss /<prefix>?<query>). The Worker must
@@ -115,9 +122,15 @@ async function bootstrapCommand(values, { fetch, run, log }) {
   if (!values.path) throw new UsageError("bootstrap needs --path /<prefix>");
   const prefix = prefixArg(values.path);
   const publicPaths = publicPathsArg(values, prefix);
+  const cloneDir = resolve(values.clone ?? ".");
+  try {
+    if (values.wrangler !== undefined) resolveWranglerPath(cloneDir, values.wrangler);
+  } catch (err) {
+    throw new UsageError(err.message);
+  }
   const config = loadConfig(values.config ?? defaultConfigPath(), run);
   const cf = { fetch, accountId: config.accountId, token: keychainRead(run, SETUP_TOKEN_ACCOUNT) };
-  const opts = { repo: values.repo, prefix, cloneDir: resolve(values.clone ?? "."), d1Flag: values.d1,
+  const opts = { repo: values.repo, prefix, cloneDir, d1Flag: values.d1, wrangler: values.wrangler,
     public: values.public, publicPaths, config };
 
   const actions = await planBootstrap({ cf, run, fetch }, opts);
@@ -144,6 +157,7 @@ export async function main(argv, deps) {
         public: { type: "boolean", default: false },
         "public-path": { type: "string", multiple: true },
         clone: { type: "string" },
+        wrangler: { type: "string" },
         config: { type: "string" },
         domain: { type: "string" },
         team: { type: "string" },

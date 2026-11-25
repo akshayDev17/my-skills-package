@@ -19,7 +19,7 @@ bin, so it runs with or without an agent. Works with Claude Code, Codex, Gemini 
 
 ```sh
 portfolio-app bootstrap --repo <owner/name> --path /<prefix> [--public | --public-path <path>…]
-                        [--d1 <name>] [--clone <dir>] [--wrangler <path>] [--apply]
+                        [--d1 <name>] [--clone <dir>] [--wrangler <path>] [--access-vars] [--apply]
 ```
 
 A prefix may have several segments (`/work/election-atlas`). Without `--public`, three steps,
@@ -47,7 +47,14 @@ each one only filling in what is missing:
    `name`, which come from the same file. Without it nothing changes.
 3. **GitHub.** Create the repo's `production` environment and set `CLOUDFLARE_API_TOKEN` (the
    narrow deploy token) and `CLOUDFLARE_ACCOUNT_ID` through `gh`. Secret values go to `gh` over
-   stdin, never in argv.
+   stdin, never in argv. With `--access-vars` (off by default, so existing apps and re-runs
+   change nothing; not allowed with `--public`, which has no Access app) it also sets two
+   non-secret *variables* in that environment: `ACCESS_AUD`, the sign-in Access app's AUD tag
+   (never the Bypass app's), and `ACCESS_TEAM_DOMAIN`, the config's `<team>.cloudflareaccess.com`.
+   The plan shows both lines before `--apply`; a variable that already holds the value is
+   skipped, one holding another value is updated, and for an app the run is about to create
+   the plan says the AUD is known once it exists. An existing sign-in app whose answer has no
+   AUD is a conflict. The owner never types either value.
 
 ### `--public`: an app anyone can reach
 

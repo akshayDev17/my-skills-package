@@ -80,6 +80,8 @@ import {
   ghEnvironmentExists,
   ghSecretNames,
   ghSetSecret,
+  ghSetVariable,
+  ghVariables,
   keychainHas,
   keychainRead,
 } from "./local.mjs";
@@ -502,7 +504,36 @@ async function applyRoutes({ cf, fetch, sleep, log }, routeActions, { prefix, co
   }
 }
 
-function planGithub({ run }, { repo }) {
+/**
+ * `--access-vars` only: the two non-secret variables the app's Worker config needs. The AUD
+ * is the sign-in Access app's (never the Bypass app's); an app the plan creates has none yet,
+ * so its line says the value comes from the created app.
+ */
+function planAccessVars({ run }, { repo, config }, accessActions, envExists) {
+  const signIn = accessActions.find((a) => a.kind === "app" && a.step === "access");
+  const present = envExists ? ghVariables(run, repo) : {};
+  const want = (name, value, source) => {
+    if (value === null && signIn?.state === "ok") {
+      return { step: "github", kind: "gh-variable", state: "conflict", name,
+        summary: `Access app "${signIn.name}" has no AUD tag in Cloudflare's answer, so ${name} cannot be set; read it from the app in the Zero Trust dashboard` };
+    }
+    if (value === null) {
+      return { step: "github", kind: "gh-variable", state: "create", name, value, from: "sign-in-app",
+        summary: `set variable ${name} to ${source} (known once the app is created)` };
+    }
+    if (present[name] === value) {
+      return { step: "github", kind: "gh-variable", state: "ok", name, value, summary: `variable ${name} is already ${value}` };
+    }
+    return { step: "github", kind: "gh-variable", state: "create", name, value,
+      summary: `set variable ${name} to ${value}${name in present ? ` (now ${present[name]})` : ""}` };
+  };
+  return [
+    want("ACCESS_AUD", signIn?.state === "ok" ? signIn.aud : null, `the AUD tag of the sign-in Access app "${signIn?.name}"`),
+    want("ACCESS_TEAM_DOMAIN", `${config.team}.cloudflareaccess.com`),
+  ];
+}
+
+function planGithub({ run }, { repo, accessVars, config }, accessActions) {
   const actions = [];
   const envExists = ghEnvironmentExists(run, repo);
   actions.push(envExists
@@ -525,6 +556,7 @@ function planGithub({ run }, { repo }) {
         summary: `set secret ${secret.name} from ${secret.source}` });
     }
   }
+  if (accessVars) actions.push(...planAccessVars({ run }, { repo, config }, accessActions, envExists));
   return actions;
 }
 
@@ -538,16 +570,17 @@ async function planPrivateAccess(deps, opts) {
 
 /**
  * Read-only. `deps = { cf, run, fetch }`;
- * `opts = { repo, prefix, cloneDir, d1Flag, public, publicPaths, config }`.
+ * `opts = { repo, prefix, cloneDir, wrangler, d1Flag, public, publicPaths, accessVars, config }`.
  */
 export async function planBootstrap(deps, opts) {
   const clone = readClone(deps, opts);
+  const access = opts.public ? await planPublicAccess(deps, opts) : await planPrivateAccess(deps, opts);
   return [
-    ...(opts.public ? await planPublicAccess(deps, opts) : await planPrivateAccess(deps, opts)),
+    ...access,
     ...(await planD1(deps, opts, clone)),
     ...(opts.public ? await planR2(deps, clone) : []),
     ...(opts.public ? await planRoutes(deps, opts, clone) : []),
-    ...planGithub(deps, opts),
+    ...planGithub(deps, opts, access),
   ];
 }
 
@@ -644,7 +677,7 @@ export async function applyBootstrap({ cf, run, fetch, sleep, log }, actions, { 
   let databaseId = actions.find((a) => a.kind === "d1-database" || a.kind === "d1-config")?.databaseId ?? null;
   // Every Access app the run created or found, for the AUD lines: [{ name, aud, created }].
   const accessApps = actions.filter((a) => (a.kind === "app" || a.kind === "bypass-app") && a.state === "ok" && a.name)
-    .map((a) => ({ name: a.name, aud: a.aud ?? null, created: false }));
+    .map((a) => ({ name: a.name, aud: a.aud ?? null, created: false, signIn: a.kind === "app" }));
 
   if (!isPublic) {
     const slash = `${config.domain}${prefix}/`;
@@ -679,7 +712,7 @@ export async function applyBootstrap({ cf, run, fetch, sleep, log }, actions, { 
         log(`  + created reusable policy "${action.name}"`);
       } else if (action.kind === "app") {
         const created = await createSelfHostedApp(cf, { name: action.name, uris: action.uris, policyId });
-        accessApps.push({ name: action.name, aud: audOf(created), created: true });
+        accessApps.push({ name: action.name, aud: audOf(created), created: true, signIn: true });
         log(`  + created Access app "${action.name}"`);
       } else if (action.kind === "app-narrowing") {
         await putAddedDestinations(cf, action, await readPlannedApp(cf, action));
@@ -749,6 +782,12 @@ export async function applyBootstrap({ cf, run, fetch, sleep, log }, actions, { 
       const value = action.name === "CLOUDFLARE_API_TOKEN" ? keychainRead(run, DEPLOY_TOKEN_ACCOUNT) : config.accountId;
       ghSetSecret(run, repo, action.name, value);
       log(`  + set secret ${action.name} on ${repo}/${GITHUB_ENVIRONMENT}`);
+    } else if (action.kind === "gh-variable") {
+      // The sign-in app's tag: the plan had it, or the app was created by this run.
+      const value = action.value ?? accessApps.find((a) => a.signIn)?.aud ?? null;
+      if (value === null) throw new Error(`cannot set variable ${action.name}: Cloudflare's answer for the sign-in Access app had no AUD tag; read it from the app in the Zero Trust dashboard`);
+      ghSetVariable(run, repo, action.name, value);
+      log(`  + set variable ${action.name} on ${repo}/${GITHUB_ENVIRONMENT} to ${value}`);
     }
   }
 }

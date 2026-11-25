@@ -283,3 +283,95 @@ test("AUD: an answer without a tag says so rather than inventing one", async () 
   assert.equal(code, 0, out.join("\n"));
   assert.match(out.join("\n"), /AUD tag of Access app "chief-of-staff \(\/chief-of-staff\)" \(created\): not in Cloudflare's answer; read it from the app in the Zero Trust dashboard/);
 });
+
+// --- --access-vars ------------------------------------------------------------------------
+
+const VARS = ["--wrangler", "shell/wrangler.jsonc", "--access-vars"];
+const varCalls = (r) => r.proc.calls.filter((c) => c.cmd === "gh" && c.args[0] === "variable" && c.args[1] === "set");
+
+test("--access-vars: off by default, nothing about variables is planned, read or set", async () => {
+  const world = worldFor();
+  const { dir } = cloneWith("shell/wrangler.jsonc", SHELL_WRANGLER);
+  const r = await run(world, dir, ["--wrangler", "shell/wrangler.jsonc", "--apply"]);
+  assert.equal(r.code, 0, r.err);
+  assert.doesNotMatch(r.out, /variable/);
+  assert.deepEqual(r.proc.calls.filter((c) => c.args[0] === "variable"), []);
+  assert.equal(world.local.github.variables, undefined);
+});
+
+test("--access-vars: the plan shows both lines before --apply, sets nothing, and an AUD not yet minted is not invented", async () => {
+  const world = worldFor();
+  const { dir } = cloneWith("shell/wrangler.jsonc", SHELL_WRANGLER);
+  const r = await run(world, dir, VARS);
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /\+ set variable ACCESS_AUD to the AUD tag of the sign-in Access app "chief-of-staff \(\/chief-of-staff\)" \(known once the app is created\)/);
+  assert.match(r.out, new RegExp(`\\+ set variable ACCESS_TEAM_DOMAIN to test-team\\.cloudflareaccess\\.com`));
+  assert.deepEqual(varCalls(r), []);
+  assert.deepEqual(r.http.calls.filter((c) => c.method !== "GET"), []);
+});
+
+test("--access-vars: apply sets ACCESS_AUD to the created sign-in app's tag and ACCESS_TEAM_DOMAIN from the config; a re-run changes nothing", async () => {
+  const world = worldFor();
+  const { dir } = cloneWith("shell/wrangler.jsonc", SHELL_WRANGLER);
+  const first = await run(world, dir, [...VARS, "--apply"]);
+  assert.equal(first.code, 0, first.err);
+  const aud = world.site.apps[0].aud;
+  assert.deepEqual(world.local.github.variables, { ACCESS_AUD: aud, ACCESS_TEAM_DOMAIN: "test-team.cloudflareaccess.com" });
+  assert.match(first.out, new RegExp(`\\+ set variable ACCESS_AUD on ${REPO}/production to ${aud}`));
+  const secretsBefore = [...world.local.github.secrets];
+
+  const again = await run(world, dir, [...VARS, "--apply"]);
+  assert.equal(again.code, 0, again.err);
+  assert.match(again.out, new RegExp(`✓ variable ACCESS_AUD is already ${aud}`));
+  assert.match(again.out, /✓ variable ACCESS_TEAM_DOMAIN is already test-team\.cloudflareaccess\.com/);
+  assert.match(again.out, /nothing to create — already bootstrapped/);
+  assert.deepEqual(varCalls(again), [], "equal values are skipped, not re-set");
+  assert.deepEqual(world.local.github.secrets, secretsBefore);
+  for (const r of [first, again]) assert.ok(!r.out.includes(SETUP_TOKEN) && !r.out.includes(DEPLOY_TOKEN));
+});
+
+test("--access-vars: a variable holding another value is updated, and the plan says what it is now", async () => {
+  const world = worldFor();
+  const { dir } = cloneWith("shell/wrangler.jsonc", SHELL_WRANGLER);
+  await run(world, dir, [...VARS, "--apply"]);
+  world.local.github.variables.ACCESS_TEAM_DOMAIN = "old.cloudflareaccess.com";
+  const aud = world.site.apps[0].aud;
+  const r = await run(world, dir, [...VARS, "--apply"]);
+  assert.match(r.out, /\+ set variable ACCESS_TEAM_DOMAIN to test-team\.cloudflareaccess\.com \(now old\.cloudflareaccess\.com\)/);
+  assert.deepEqual(varCalls(r).map((c) => c.args[2]), ["ACCESS_TEAM_DOMAIN"], "only the one that differs");
+  assert.deepEqual(world.local.github.variables, { ACCESS_AUD: aud, ACCESS_TEAM_DOMAIN: "test-team.cloudflareaccess.com" });
+});
+
+test("--access-vars: on an existing app the plan shows the real AUD; the sign-in app's, never the Bypass app's", async () => {
+  const world = worldFor();
+  const { dir } = cloneWith("shell/wrangler.jsonc", SHELL_WRANGLER);
+  const mixed = [...VARS, "--public-path", `${PREFIX}/public`];
+  await run(world, dir, [...mixed, "--apply"]);
+  const [allow, bypass] = world.site.apps;
+  world.local.github.variables = {};
+  const planOnly = await run(world, dir, mixed);
+  assert.match(planOnly.out, new RegExp(`\\+ set variable ACCESS_AUD to ${allow.aud}\n`));
+  assert.ok(!planOnly.out.includes(`set variable ACCESS_AUD to ${bypass.aud}`));
+  assert.deepEqual(varCalls(planOnly), []);
+  await run(world, dir, [...mixed, "--apply"]);
+  assert.equal(world.local.github.variables.ACCESS_AUD, allow.aud);
+});
+
+test("--access-vars: an existing sign-in app whose answer has no AUD is a conflict, not a guess", async () => {
+  const world = worldFor();
+  const { dir } = cloneWith("shell/wrangler.jsonc", SHELL_WRANGLER);
+  await run(world, dir, ["--wrangler", "shell/wrangler.jsonc", "--apply"]);
+  delete world.site.apps[0].aud;
+  const r = await run(world, dir, [...VARS, "--apply"]);
+  assert.equal(r.code, 2);
+  assert.match(r.out, /✗ Access app "chief-of-staff \(\/chief-of-staff\)" has no AUD tag in Cloudflare's answer, so ACCESS_AUD cannot be set/);
+  assert.deepEqual(varCalls(r), []);
+});
+
+test("--access-vars with --public is a usage error: there is no Access app", async () => {
+  const { dir } = cloneWith("shell/wrangler.jsonc", SHELL_WRANGLER);
+  const r = await run(worldFor(), dir, [...VARS, "--public"]);
+  assert.equal(r.code, 2);
+  assert.match(r.err, /--access-vars needs an Access app/);
+  assert.deepEqual(r.http.calls, []);
+});

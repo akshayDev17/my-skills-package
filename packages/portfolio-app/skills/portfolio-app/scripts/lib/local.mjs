@@ -100,6 +100,21 @@ export function ghSecretNames(run, repo) {
   return JSON.parse(stdout || "[]").map((s) => s.name);
 }
 
+/** The environment's variables as `{ name: value }`. Variables are not secret, so `gh` lists their values. */
+export function ghVariables(run, repo) {
+  const { code, stdout, stderr } = run("gh", [
+    "variable", "list", "--repo", repo, "--env", GITHUB_ENVIRONMENT, "--json", "name,value",
+  ]);
+  if (code !== 0) throw new Error(`gh: could not list ${GITHUB_ENVIRONMENT} variables of ${repo}: ${stderr.trim()}`);
+  return Object.fromEntries(JSON.parse(stdout || "[]").map((v) => [v.name, v.value]));
+}
+
+/** Creates or updates the variable; the value goes over stdin like a secret's, though it is not one. */
+export function ghSetVariable(run, repo, name, value) {
+  const { code, stderr } = run("gh", ["variable", "set", name, "--repo", repo, "--env", GITHUB_ENVIRONMENT], { input: value });
+  if (code !== 0) throw new Error(`gh: could not set variable ${name} on ${repo}/${GITHUB_ENVIRONMENT}: ${stderr.trim()}`);
+}
+
 export function ghCreateEnvironment(run, repo) {
   const { code, stderr } = run("gh", ["api", "-X", "PUT", `repos/${repo}/environments/${GITHUB_ENVIRONMENT}`]);
   if (code !== 0) throw new Error(`gh: could not create environment ${GITHUB_ENVIRONMENT} on ${repo}: ${stderr.trim()}`);

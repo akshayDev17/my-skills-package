@@ -240,6 +240,14 @@ export function fakeRun(state) {
       if (args[0] === "secret" && args[1] === "list") {
         return ok(JSON.stringify(env.secrets.map((name) => ({ name }))));
       }
+      if (args[0] === "variable" && args[1] === "list") {
+        if (!env.environment) return fail("gh: HTTP 404: Not Found");
+        return ok(JSON.stringify(Object.entries(env.variables ?? {}).map(([name, value]) => ({ name, value }))));
+      }
+      if (args[0] === "variable" && args[1] === "set") {
+        env.variables = { ...env.variables, [args[2]]: opts.input };
+        return ok("");
+      }
       if (args[0] === "secret" && args[1] === "set") {
         env.secrets.push(args[2]);
         env.values = { ...env.values, [args[2]]: opts.input };

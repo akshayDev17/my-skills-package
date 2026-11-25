@@ -13,7 +13,7 @@ The script is `scripts/portfolio-app.mjs`, next to this file. Run it with `node`
 
 - **Repo** — `owner/name` of the sub-app (e.g. `akshayDev17/graph-notes`).
 - **Prefix** — the path it lives under (e.g. `/graph`). Refused: empty, `/`, and anything under ai-chat-archive's site-wide `/api`, `/_next` or `/vendors`.
-- **Local clone** — a checkout of that repo; the D1 id is written into its `backend/wrangler.jsonc`.
+- **Local clone** — a checkout of that repo; the D1 id is written into its `backend/wrangler.jsonc` (or the `--wrangler` file).
 - **Worker config** — optional `--wrangler <path>`, a path inside the clone, for a repo whose Worker config is not `backend/wrangler.jsonc` (chief-of-staff's is `shell/wrangler.jsonc`). It replaces the default for the whole run: the D1 plan and write, the messages that name the file, and, with `--public`, the R2 and Worker-name reads. A path that leaves the clone is refused. Pass it on the plan and on `--apply` alike.
 - **Access variables** — optional `--access-vars` (never with `--public`): `--apply` also sets the GitHub `production` variables `ACCESS_AUD` (the sign-in app's AUD tag) and `ACCESS_TEAM_DOMAIN` (`<team>.cloudflareaccess.com`). Add it only when the user asks or the app's CI reads them; the plan lists both lines, and a variable already equal is skipped.
 - **D1 name** — optional; by default the `database_name` of the entry still holding a placeholder: `REPLACE_AFTER_d1_create` or `00000000-0000-0000-0000-000000000000`.

@@ -71,8 +71,9 @@ says the two destinations will be reachable by anyone. The steps, in apply order
 3. **R2.** Find the bucket by name or create it. The name is the single `bucket_name` in the
    clone's `r2_buckets` (several names are a conflict; none means no R2 step).
 4. **Worker route.** Exactly one, `<domain>/<prefix>*`, pointing at the Worker named by `name`
-   in the clone's `backend/wrangler.jsonc` (why one route and not `<domain>/<prefix>` +
-   `<domain>/<prefix>/*`, and what the Worker must do with it: see
+   in the clone's Worker config, `backend/wrangler.jsonc` or the `--wrangler` file (why one
+   route and not `<domain>/<prefix>` + `<domain>/<prefix>/*`, and what the Worker must do with
+   it: see
    [The Worker route and its pass-through](#the-worker-route-and-its-pass-through)). A route
    can only name a deployed Worker (see the research notes), so before the first deploy the
    plan says so and creates nothing here; re-run after that deploy to add the route. With

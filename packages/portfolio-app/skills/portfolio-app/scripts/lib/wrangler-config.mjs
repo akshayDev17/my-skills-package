@@ -1,11 +1,30 @@
-// Reads and edits a sub-app's `backend/wrangler.jsonc` without losing its comments.
+// Reads and edits a sub-app's Worker config (`backend/wrangler.jsonc` unless `--wrangler`
+// names another file) without losing its comments.
 //
 // The file is JSONC: the repos explain their bindings in comments, so a parse-and-
 // reserialize would delete the explanation. Reading strips comments and trailing
-// commas; writing replaces only the placeholder *string tokens*, leaving every byte
-// around them as it was — including a comment that happens to mention the placeholder.
+// commas; writing replaces only the placeholder *string tokens* that are the value of a
+// `database_id` key in a top-level `d1_databases` entry, leaving every byte around them as
+// it was — including a comment that mentions the placeholder, an all-zero id held by some
+// other field, and a placeholder in a nested section such as `env.preview`.
 
-export const D1_PLACEHOLDER = "REPLACE_AFTER_d1_create";
+import { isAbsolute, relative, resolve } from "node:path";
+
+export const DEFAULT_WRANGLER = "backend/wrangler.jsonc";
+
+/** The two stand-ins a repo may hold for a D1 id that does not exist yet. */
+export const D1_PLACEHOLDERS = ["REPLACE_AFTER_d1_create", "00000000-0000-0000-0000-000000000000"];
+export const D1_PLACEHOLDER = D1_PLACEHOLDERS[0];
+
+/** Absolute path of the Worker config inside `cloneDir`; throws if `relPath` is absolute or leaves the clone. */
+export function resolveWranglerPath(cloneDir, relPath = DEFAULT_WRANGLER) {
+  const abs = resolve(cloneDir, relPath);
+  const inside = relative(resolve(cloneDir), abs);
+  if (isAbsolute(relPath) || inside === "" || inside === ".." || inside.startsWith("../") || isAbsolute(inside)) {
+    throw new Error(`--wrangler ${relPath} must be a file path inside the clone ${cloneDir}`);
+  }
+  return abs;
+}
 
 /** Splits JSONC into string, comment and other segments; joining them gives back the input. */
 function tokenize(text) {
@@ -58,10 +77,40 @@ export function parseJsonc(text) {
   return JSON.parse(json);
 }
 
+/**
+ * Replaces each placeholder that is the `database_id` of an entry in the top-level
+ * `d1_databases` array, the entries `d1Target` reads; nested sections such as
+ * `env.preview.d1_databases` and every other byte stay.
+ */
 export function replacePlaceholder(text, databaseId) {
-  const placeholder = JSON.stringify(D1_PLACEHOLDER);
+  const placeholders = D1_PLACEHOLDERS.map((p) => JSON.stringify(p));
+  const open = []; // each enclosing `{` or `[`, with the key it is the value of
+  let lastString = null; // the last string token
+  let between = ""; // the non-comment text since that string
+  const keyed = () => lastString !== null && /^\s*:\s*$/.test(between);
+  const inTopLevelD1Entry = () =>
+    open.length === 3 && open[0].ch === "{" && open[1].ch === "[" && open[1].key === '"d1_databases"' && open[2].ch === "{";
   return tokenize(text)
-    .map((t) => (t.kind === "string" && t.text === placeholder ? JSON.stringify(databaseId) : t.text))
+    .map((t) => {
+      if (t.kind === "comment") return t.text;
+      if (t.kind === "other") {
+        for (const ch of t.text) {
+          if (ch === "{" || ch === "[") open.push({ ch, key: keyed() ? lastString : null });
+          else if (ch === "}" || ch === "]") open.pop();
+          else {
+            between += ch;
+            continue;
+          }
+          lastString = null;
+          between = "";
+        }
+        return t.text;
+      }
+      const isValue = keyed() && lastString === '"database_id"' && inTopLevelD1Entry() && placeholders.includes(t.text);
+      lastString = t.text;
+      between = "";
+      return isValue ? JSON.stringify(databaseId) : t.text;
+    })
     .join("");
 }
 
@@ -69,16 +118,16 @@ export function replacePlaceholder(text, databaseId) {
  * Which D1 database bootstrap should ensure for this config.
  *   { state: "none" }                       no D1 binding, nothing to do
  *   { state: "present", name }              every binding already carries a real id
- *   { state: "missing", name }              placeholder entries all name `name`
+ *   { state: "missing", name, placeholders } placeholder entries all name `name`; `placeholders` are the ones found
  *   { state: "conflict", reason }           ambiguous or inconsistent; a human decides
  */
 export function d1Target(config, d1Flag) {
   const entries = config.d1_databases ?? [];
-  const placeholders = entries.filter((e) => e.database_id === D1_PLACEHOLDER);
+  const placeholders = entries.filter((e) => D1_PLACEHOLDERS.includes(e.database_id));
   const names = [...new Set(placeholders.map((e) => e.database_name))];
 
   if (placeholders.some((e) => !e.database_name)) {
-    return { state: "conflict", reason: `a d1_databases entry with the ${D1_PLACEHOLDER} placeholder has no database_name` };
+    return { state: "conflict", reason: `a d1_databases entry with a placeholder database_id (${D1_PLACEHOLDERS.join(" or ")}) has no database_name` };
   }
   if (names.length > 1) {
     return { state: "conflict", reason: `placeholder entries name several databases (${names.join(", ")}); bootstrap handles one per app` };
@@ -86,11 +135,11 @@ export function d1Target(config, d1Flag) {
   if (d1Flag && names.length === 1 && names[0] !== d1Flag) {
     return { state: "conflict", reason: `--d1 ${d1Flag} but the placeholder entry names database "${names[0]}"` };
   }
-  if (names.length === 1) return { state: "missing", name: names[0] };
+  if (names.length === 1) return { state: "missing", name: names[0], placeholders: [...new Set(placeholders.map((e) => e.database_id))] };
   if (d1Flag) {
     return entries.some((e) => e.database_name === d1Flag)
       ? { state: "present", name: d1Flag }
-      : { state: "conflict", reason: `--d1 ${d1Flag} but wrangler.jsonc has no d1_databases entry for it; add the binding first` };
+      : { state: "conflict", reason: `--d1 ${d1Flag} but the Worker config has no d1_databases entry for it; add the binding first` };
   }
   if (entries.length === 0) return { state: "none" };
   return { state: "present", name: [...new Set(entries.map((e) => e.database_name))].join(", ") };

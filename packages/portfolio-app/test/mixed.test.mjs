@@ -132,6 +132,8 @@ test("mixed, fresh apply: Allow then Bypass, waits for both answers, then D1 and
     `  + created reusable policy "portfolio-app public" (bypass: everyone)`,
     `  + created Bypass app "time-track (public)"`,
     `  ✓ /time-track redirects to ${TEAM}.cloudflareaccess.com, and its 2 public path(s) answer signed out`,
+    `  AUD tag of Access app "time-track (/time-track)" (created): aud-minted-1`,
+    `  AUD tag of Access app "time-track (public)" (created): aud-minted-2`,
     `  + created D1 database "time-track" (00000000-0000-4000-8000-000000000001)`,
     "  + wrote database_id into <CLONE>/backend/wrangler.jsonc — commit it through the normal delivery path",
     "  + created environment production on owner/time-track",
@@ -188,7 +190,7 @@ test("mixed, existing Allow app without narrowing: exactly an add to it, then th
   assert.deepEqual(conflicts(actions), []);
   assert.deepEqual(actions.filter((a) => a.state === "warn"), []);
   const text = formatPlan(actions, { ...gnOpts(cloneDir), apply: false });
-  assert.match(text, /✓ Access app "graph-notes \(\/graph\)" guards example\.com\/graph \+ example\.com\/graph\/\*\n/);
+  assert.match(text, /✓ Access app "graph-notes \(\/graph\)" guards example\.com\/graph \+ example\.com\/graph\/\* \(AUD aud-graph\)\n/);
   assert.ok(text.includes(`  + add narrowing destination(s) ${GN_NARROWING.join(" + ")} to "graph-notes (/graph)" — the paths under each exact public path ask for sign-in\n`), text);
   assert.ok(text.includes([
     `  ·   example.com/graph/api/public/* → "graph-notes (public)" — Bypass, anyone`,
@@ -236,7 +238,7 @@ test("mixed, graph-notes as it stands today (narrowing paths and public app in p
     assert.deepEqual(creates(actions), [], `inline=${inline}`);
     assert.deepEqual(conflicts(actions), [], `inline=${inline}`);
     assert.ok(!actions.some((a) => a.kind === "app-narrowing"), "nothing to add to the Allow app");
-    assert.match(actions.find((a) => a.kind === "app").summary, new RegExp(`guards .*${GN_NARROWING.map((u) => u.replaceAll(".", "\\.").replaceAll("*", "\\*")).join(" \\+ ")}$`));
+    assert.match(actions.find((a) => a.kind === "app").summary, new RegExp(`guards .*${GN_NARROWING.map((u) => u.replaceAll(".", "\\.").replaceAll("*", "\\*")).join(" \\+ ")} \\(AUD aud-graph\\)$`));
     assert.match(actions.find((a) => a.kind === "bypass-app").summary, /^Bypass app "graph-notes \(public\)" lets anyone reach /);
     assert.ok(!actions.some((a) => a.kind === "bypass-policy"), "no policy step when the app already exists");
     assert.equal(actions.find((a) => a.kind === "check").state, "ok", "every child probe already asks for sign-in");
@@ -371,7 +373,7 @@ test("mixed narrowing skips the bare prefix and any path whose children a listed
 
 test("mixed refuses to move a destination out of an existing private app (time-track already fully private)", async () => {
   const world = timeTrackWorld();
-  world.site.apps.push({ id: "app-tt", name: "time-track (/time-track)",
+  world.site.apps.push({ id: "app-tt", aud: "aud-tt-allow", name: "time-track (/time-track)",
     destinations: [{ uri: `${DOMAIN}/time-track` }, { uri: `${DOMAIN}/time-track/*` }], policies: [] });
   const h = harness(world);
   const actions = await planBootstrap(h.deps, ttOpts(makeClone(WRANGLER_TT)));
@@ -512,11 +514,11 @@ test("mixed apply passes when the only exact public path is the prefix, whose ch
 // time-track as it stands on the live account (2026-11-15): the Allow app on time-track/*,
 // the public app on exactly time-track and time-track/_next/*, D1 and secrets in place.
 const TT_PUBLIC_APP = {
-  id: "app-tt-pub", name: "time-track (public)", type: "self_hosted", domain: `${DOMAIN}/time-track`, session_duration: "24h",
+  id: "app-tt-pub", aud: "aud-tt-public", name: "time-track (public)", type: "self_hosted", domain: `${DOMAIN}/time-track`, session_duration: "24h",
   destinations: TT.publicPaths.map((p) => ({ type: "public", uri: `${DOMAIN}${p}` })), policies: [{ id: "pol-public", precedence: 1 }],
 };
 const TT_ALLOW_APP = {
-  id: "app-tt", name: "time-track (/time-track)", type: "self_hosted",
+  id: "app-tt", aud: "aud-tt-allow", name: "time-track (/time-track)", type: "self_hosted",
   destinations: [{ type: "public", uri: `${DOMAIN}/time-track/*` }], policies: [{ id: "pol-signin", precedence: 1 }],
 };
 const TT_DB = "22222222-2222-4333-8444-555555555555";
@@ -562,8 +564,8 @@ test("mixed, time-track re-run with /time-track/: the plan adds only that destin
     "portfolio-app bootstrap owner/time-track /time-track (mixed: sign-in except /time-track, /time-track/_next/*, /time-track/) — plan only; nothing changes without --apply",
     "Cloudflare Access",
     `  ✓ reusable policy "portfolio-app sign-in" exists`,
-    `  ✓ Access app "time-track (/time-track)" guards example.com/time-track/*`,
-    `  ✓ Bypass app "time-track (public)" lets anyone reach example.com/time-track + example.com/time-track/_next/*`,
+    `  ✓ Access app "time-track (/time-track)" guards example.com/time-track/* (AUD aud-tt-allow)`,
+    `  ✓ Bypass app "time-track (public)" lets anyone reach example.com/time-track + example.com/time-track/_next/* (AUD aud-tt-public)`,
     `  + add public destination(s) example.com/time-track/ to Bypass app "time-track (public)" (anyone, no sign-in)`,
     "  · who answers (the app with the most specific matching destination wins; Bypass lets anyone in, Allow asks for sign-in):",
     `  ·   example.com/time-track → "time-track (public)" — Bypass, anyone`,
@@ -604,11 +606,13 @@ test("mixed, time-track re-run with /time-track/ applied: one PUT adds it, the c
   assert.deepEqual(h.logs, [
     `  + added public destination(s) ${DOMAIN}/time-track/ to Bypass app "time-track (public)"`,
     `  ✓ /time-track redirects to ${TEAM}.cloudflareaccess.com, and its 3 public path(s) answer signed out`,
+    `  AUD tag of Access app "time-track (/time-track)" (found): aud-tt-allow`,
+    `  AUD tag of Access app "time-track (public)" (found): aud-tt-public`,
   ]);
 
   const replan = await planBootstrap(harness(world).deps, opts);
   assert.deepEqual(creates(replan), []);
-  assert.match(replan.find((a) => a.kind === "bypass-app").summary, /lets anyone reach example\.com\/time-track \+ example\.com\/time-track\/_next\/\* \+ example\.com\/time-track\/$/);
+  assert.match(replan.find((a) => a.kind === "bypass-app").summary, /lets anyone reach example\.com\/time-track \+ example\.com\/time-track\/_next\/\* \+ example\.com\/time-track\/ \(AUD aud-tt-public\)$/);
   assert.equal(replan.find((a) => a.kind === "check").state, "ok");
   assert.equal(replan.filter((a) => a.kind === "coverage").at(-1).summary,
     `  example.com/time-track/<child> → "time-track (/time-track)" (by example.com/time-track/*) — Allow, sign-in; ` +

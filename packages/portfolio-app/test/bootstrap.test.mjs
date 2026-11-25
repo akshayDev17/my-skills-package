@@ -297,6 +297,7 @@ test("regression: without --public, a fresh private plan, its apply and its Clou
     `  + created reusable policy "portfolio-app sign-in"`,
     `  + created Access app "graph-notes (/graph)"`,
     `  ✓ /graph redirects to ${TEAM}.cloudflareaccess.com`,
+    `  AUD tag of Access app "graph-notes (/graph)" (created): aud-minted-1`,
     `  + created D1 database "graph-notes" (00000000-0000-4000-8000-000000000001)`,
     "  + wrote database_id into <CLONE>/backend/wrangler.jsonc — commit it through the normal delivery path",
     "  + created environment production on owner/graph-notes",

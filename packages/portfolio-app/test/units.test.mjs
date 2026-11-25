@@ -94,8 +94,8 @@ test("replacePlaceholder edits only the string value, leaving comments byte-for-
 test("d1Target decides one database per app, and says why when it cannot", () => {
   const entry = (name, id = D1_PLACEHOLDER) => ({ binding: "DB", database_name: name, database_id: id });
   assert.deepEqual(d1Target({}, undefined), { state: "none" });
-  assert.deepEqual(d1Target({ d1_databases: [entry("g")] }, undefined), { state: "missing", name: "g" });
-  assert.deepEqual(d1Target({ d1_databases: [entry("g"), entry("g")] }, "g"), { state: "missing", name: "g" });
+  assert.deepEqual(d1Target({ d1_databases: [entry("g")] }, undefined), { state: "missing", name: "g", placeholders: [D1_PLACEHOLDER] });
+  assert.deepEqual(d1Target({ d1_databases: [entry("g"), entry("g")] }, "g"), { state: "missing", name: "g", placeholders: [D1_PLACEHOLDER] });
   assert.equal(d1Target({ d1_databases: [entry("g")] }, "other").state, "conflict");
   assert.equal(d1Target({ d1_databases: [entry("a"), entry("b")] }, undefined).state, "conflict");
   assert.equal(d1Target({ d1_databases: [{ binding: "DB", database_id: D1_PLACEHOLDER }] }, undefined).state, "conflict");

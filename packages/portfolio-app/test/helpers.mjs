@@ -146,7 +146,8 @@ export function fakeFetch(state) {
     }
     if (path === `${base}/access/apps` && method === "GET") return list(state.apps);
     if (path === `${base}/access/apps` && method === "POST") {
-      const app = { id: `app-${state.apps.length + 1}`, ...JSON.parse(init.body) };
+      // Cloudflare mints the read-only `aud` tag when it creates an app.
+      const app = { id: `app-${state.apps.length + 1}`, aud: `aud-minted-${state.apps.length + 1}`, ...JSON.parse(init.body) };
       state.apps.push(app);
       return jsonResponse(200, { success: true, result: app });
     }
@@ -238,6 +239,14 @@ export function fakeRun(state) {
       if (args[0] === "api") return env.environment ? ok("{}") : fail("gh: Not Found (HTTP 404)");
       if (args[0] === "secret" && args[1] === "list") {
         return ok(JSON.stringify(env.secrets.map((name) => ({ name }))));
+      }
+      if (args[0] === "variable" && args[1] === "list") {
+        if (!env.environment) return fail("gh: HTTP 404: Not Found");
+        return ok(JSON.stringify(Object.entries(env.variables ?? {}).map(([name, value]) => ({ name, value }))));
+      }
+      if (args[0] === "variable" && args[1] === "set") {
+        env.variables = { ...env.variables, [args[2]]: opts.input };
+        return ok("");
       }
       if (args[0] === "secret" && args[1] === "set") {
         env.secrets.push(args[2]);

@@ -33,10 +33,11 @@ each one only filling in what is missing:
    if it never does.
 2. **D1.** Find the database by name or create it, then write its id into the clone's
    `backend/wrangler.jsonc`, replacing the placeholder `REPLACE_AFTER_d1_create` or
-   `00000000-0000-0000-0000-000000000000` held by a `database_id` (comments are preserved, and
-   so is an all-zero id in any other field, such as a KV namespace's `id`). The edit is a
-   one-line diff. The commit is left to the repo's normal delivery path. `--clone` defaults to
-   the current directory, and its `origin` must be `--repo`. `--d1` defaults to the
+   `00000000-0000-0000-0000-000000000000` held by a `database_id` in the top-level
+   `d1_databases` (comments are preserved, and so is an all-zero id in any other field, such
+   as a KV namespace's `id`, or in a nested section such as `env.preview.d1_databases`). The
+   edit is a one-line diff. The commit is left to the repo's normal delivery path. `--clone`
+   defaults to the current directory, and its `origin` must be `--repo`. `--d1` defaults to the
    `database_name` of the entry that holds the placeholder. Entries holding either placeholder
    for one database are replaced together; entries naming several databases are a conflict.
    `--wrangler <path>` names the Worker config when it is not `backend/wrangler.jsonc`, say

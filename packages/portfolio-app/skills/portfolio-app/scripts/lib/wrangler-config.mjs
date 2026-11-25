@@ -4,8 +4,9 @@
 // The file is JSONC: the repos explain their bindings in comments, so a parse-and-
 // reserialize would delete the explanation. Reading strips comments and trailing
 // commas; writing replaces only the placeholder *string tokens* that are the value of a
-// `database_id` key, leaving every byte around them as it was — including a comment that
-// mentions the placeholder, and an all-zero id held by some other field.
+// `database_id` key in a top-level `d1_databases` entry, leaving every byte around them as
+// it was — including a comment that mentions the placeholder, an all-zero id held by some
+// other field, and a placeholder in a nested section such as `env.preview`.
 
 import { isAbsolute, relative, resolve } from "node:path";
 
@@ -76,20 +77,37 @@ export function parseJsonc(text) {
   return JSON.parse(json);
 }
 
-/** Replaces each placeholder that is the value of a `"database_id":` key; every other byte stays. */
+/**
+ * Replaces each placeholder that is the `database_id` of an entry in the top-level
+ * `d1_databases` array, the entries `d1Target` reads; nested sections such as
+ * `env.preview.d1_databases` and every other byte stay.
+ */
 export function replacePlaceholder(text, databaseId) {
   const placeholders = D1_PLACEHOLDERS.map((p) => JSON.stringify(p));
-  let afterKey = false; // the last string token was `"database_id"`
+  const open = []; // each enclosing `{` or `[`, with the key it is the value of
+  let lastString = null; // the last string token
   let between = ""; // the non-comment text since that string
+  const keyed = () => lastString !== null && /^\s*:\s*$/.test(between);
+  const inTopLevelD1Entry = () =>
+    open.length === 3 && open[0].ch === "{" && open[1].ch === "[" && open[1].key === '"d1_databases"' && open[2].ch === "{";
   return tokenize(text)
     .map((t) => {
       if (t.kind === "comment") return t.text;
       if (t.kind === "other") {
-        between += t.text;
+        for (const ch of t.text) {
+          if (ch === "{" || ch === "[") open.push({ ch, key: keyed() ? lastString : null });
+          else if (ch === "}" || ch === "]") open.pop();
+          else {
+            between += ch;
+            continue;
+          }
+          lastString = null;
+          between = "";
+        }
         return t.text;
       }
-      const isValue = afterKey && /^\s*:\s*$/.test(between) && placeholders.includes(t.text);
-      afterKey = t.text === '"database_id"';
+      const isValue = keyed() && lastString === '"database_id"' && inTopLevelD1Entry() && placeholders.includes(t.text);
+      lastString = t.text;
       between = "";
       return isValue ? JSON.stringify(databaseId) : t.text;
     })

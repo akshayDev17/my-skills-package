@@ -215,8 +215,33 @@ test("two placeholder entries naming different databases are a conflict in the p
 
 test("replacePlaceholder only touches a database_id value: comments, other keys and other strings stay", () => {
   const text = `{ // "database_id": "${ZERO}"
-  "x": "${ZERO}", "preview_database_id": "${ZERO}", "database_id" /* c */ : "${ZERO}" }`;
+  "x": "${ZERO}", "preview_database_id": "${ZERO}", "d1_databases": [{ "database_id" /* c */ : "${ZERO}" }] }`;
   assert.equal(replacePlaceholder(text, "real"), text.replace(`"database_id" /* c */ : "${ZERO}"`, `"database_id" /* c */ : "real"`));
+});
+
+test("only the top-level d1_databases entry is replaced; an all-zero id in env.preview.d1_databases stays", async () => {
+  const world = worldFor();
+  const text = `{
+\t"name": "chief-of-staff-shell",
+\t"d1_databases": [
+\t\t{ "binding": "DB", "database_name": "chief-of-staff", "database_id": "${ZERO}" }
+\t],
+\t"env": {
+\t\t"preview": {
+\t\t\t"d1_databases": [
+\t\t\t\t{ "binding": "DB", "database_name": "chief-of-staff-preview", "database_id": "${ZERO}" }
+\t\t\t]
+\t\t}
+\t}
+}
+`;
+  const { dir, file } = cloneWith("shell/wrangler.jsonc", text);
+  const r = await run(world, dir, ["--wrangler", "shell/wrangler.jsonc", "--apply"]);
+  assert.equal(r.code, 0, r.err);
+  const lines = changedLines(text, readFileSync(file, "utf8"));
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].after, `\t\t{ "binding": "DB", "database_name": "chief-of-staff", "database_id": "${world.site.d1[0].uuid}" }`);
+  assert.deepEqual(world.site.d1.map((d) => d.name), ["chief-of-staff"]);
 });
 
 // --- AUD tags ---------------------------------------------------------------------------
